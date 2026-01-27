@@ -1,0 +1,16 @@
+gdown
+tensorboardX
+numpy
+torch
+torchvision
+scikit-image
+opencv-python
+h5py
+matplotlib
+efficientnet_pytorch
+einops
+timm
+yacs
+batchgenerators
+medpy
+nibabel

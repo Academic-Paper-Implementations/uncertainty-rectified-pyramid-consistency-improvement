@@ -39,7 +39,7 @@ from networks.net_factory import net_factory
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str,
-                    default='../data/ACDC', help='Name of Experiment')
+                    default='../data/ACDC/ACDC', help='Name of Experiment')
 parser.add_argument('--exp', type=str,
                     default='ACDC/URPC_Boundary_Aware', help='experiment_name')
 parser.add_argument('--model', type=str,
@@ -223,6 +223,7 @@ class BoundaryAwareDiceLoss(nn.Module):
     Boundary-Aware Dice Loss.
     
     Kết hợp Dice Loss với boundary weighting để focus vào vùng ranh giới.
+    Sử dụng weight như pixel importance thay vì nhân trực tiếp.
     """
     
     def __init__(self, num_classes, sigma=5.0, smooth=1e-5):
@@ -238,7 +239,7 @@ class BoundaryAwareDiceLoss(nn.Module):
             labels: torch.Tensor (B, H, W), ground truth labels
             
         Returns:
-            loss: scalar, boundary-aware dice loss
+            loss: scalar, boundary-aware dice loss (always >= 0)
         """
         # Softmax để có probabilities
         probs = torch.softmax(predictions, dim=1)  # (B, C, H, W)
@@ -251,19 +252,24 @@ class BoundaryAwareDiceLoss(nn.Module):
         sdm = compute_sdm_batch(labels, self.num_classes)  # (B, C, H, W)
         sdm_abs = torch.abs(sdm)
         boundary_weight = torch.exp(-sdm_abs ** 2 / (2 * self.sigma ** 2))
-        weight_map = 1.0 + boundary_weight  # (B, C, H, W)
+        weight_map = 1.0 + boundary_weight  # (B, C, H, W), range [1, 2]
         
-        # Weighted Dice Loss per class
-        weighted_probs = probs * weight_map
-        weighted_labels = labels_one_hot * weight_map
+        # Tính Dice Loss per pixel, sau đó weighted average
+        # intersection và union không nhân weight, chỉ dùng weight khi tính loss
+        intersection = (probs * labels_one_hot).sum(dim=(2, 3))  # (B, C)
+        union = probs.sum(dim=(2, 3)) + labels_one_hot.sum(dim=(2, 3))  # (B, C)
         
-        intersection = (weighted_probs * weighted_labels).sum(dim=(2, 3))
-        union = weighted_probs.sum(dim=(2, 3)) + weighted_labels.sum(dim=(2, 3))
+        dice_per_class = (2.0 * intersection + self.smooth) / (union + self.smooth)  # (B, C)
         
-        dice_per_class = (2.0 * intersection + self.smooth) / (union + self.smooth)
+        # Tính weighted dice error per pixel: |prob - label| * weight
+        dice_error = torch.abs(probs - labels_one_hot)  # (B, C, H, W)
+        weighted_error = (dice_error * weight_map).mean()  # scalar
         
-        # Average over classes (bỏ qua background class 0)
-        dice_loss = 1.0 - dice_per_class[:, 1:].mean()
+        # Kết hợp: standard dice loss + weighted boundary error
+        standard_dice_loss = 1.0 - dice_per_class[:, 1:].mean()
+        
+        # Final loss: đảm bảo luôn >= 0
+        dice_loss = standard_dice_loss + 0.5 * weighted_error
         
         return dice_loss
 
