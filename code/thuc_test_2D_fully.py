@@ -96,7 +96,24 @@ def Inference(FLAGS):
                       class_num=FLAGS.num_classes)
     save_mode_path = os.path.join(
         snapshot_path, '{}_best_model.pth'.format(FLAGS.model))
-    net.load_state_dict(torch.load(save_mode_path))
+    
+    # Check if model file exists
+    if not os.path.exists(save_mode_path):
+        raise FileNotFoundError(f"Model not found at {save_mode_path}")
+    
+    # Load checkpoint with weights_only=False for PyTorch 2.6+ compatibility
+    checkpoint = torch.load(save_mode_path, weights_only=False)
+    
+    # Handle both checkpoint dict and direct state_dict formats
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        net.load_state_dict(checkpoint['model_state_dict'])
+        print("Loaded model from checkpoint (dict format)")
+        if 'best_performance' in checkpoint:
+            print(f"Best performance (Dice): {checkpoint['best_performance']:.4f}")
+    else:
+        net.load_state_dict(checkpoint)
+        print("Loaded model from state_dict (legacy format)")
+    
     print("init weight from {}".format(save_mode_path))
     net.eval()
 
