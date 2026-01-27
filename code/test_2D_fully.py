@@ -26,6 +26,11 @@ parser.add_argument('--num_classes', type=int,  default=4,
                     help='output channel of network')
 parser.add_argument('--labeled_num', type=int, default=3,
                     help='labeled data')
+# New: Add model_path argument for Kaggle compatibility
+parser.add_argument('--model_path', type=str, default=None,
+                    help='Path to model directory. If None, uses ../model/{exp}_{labeled_num}_labeled/')
+parser.add_argument('--save_prediction', type=int, default=1,
+                    help='whether to save prediction results (1=yes, 0=no)')
 
 
 def calculate_metric_percase(pred, gt):
@@ -81,18 +86,48 @@ def Inference(FLAGS):
         image_list = f.readlines()
     image_list = sorted([item.replace('\n', '').split(".")[0]
                          for item in image_list])
-    snapshot_path = "../model/{}_{}_labeled/{}".format(
-        FLAGS.exp, FLAGS.labeled_num, FLAGS.model)
-    test_save_path = "../model/{}_{}_labeled/{}_predictions/".format(
-        FLAGS.exp, FLAGS.labeled_num, FLAGS.model)
-    if os.path.exists(test_save_path):
-        shutil.rmtree(test_save_path)
-    os.makedirs(test_save_path)
+    
+    # Use model_path if provided, otherwise use default structure
+    if FLAGS.model_path is not None:
+        snapshot_path = FLAGS.model_path
+    else:
+        snapshot_path = "../model/{}_{}_labeled".format(
+            FLAGS.exp, FLAGS.labeled_num)
+    
+    test_save_path = os.path.join(snapshot_path, "{}_predictions/".format(FLAGS.model))
+    
+    print(f"="*50)
+    print(f"Model path: {snapshot_path}")
+    print(f"Predictions will be saved to: {test_save_path}")
+    print(f"="*50)
+    
+    if FLAGS.save_prediction:
+        if os.path.exists(test_save_path):
+            shutil.rmtree(test_save_path)
+        os.makedirs(test_save_path, exist_ok=True)
+    
     net = net_factory(net_type=FLAGS.model, in_chns=1,
                       class_num=FLAGS.num_classes)
+    
+    # Try to load best model
     save_mode_path = os.path.join(
         snapshot_path, '{}_best_model.pth'.format(FLAGS.model))
-    net.load_state_dict(torch.load(save_mode_path))
+    
+    if not os.path.exists(save_mode_path):
+        # Fallback to final_model.pth
+        save_mode_path = os.path.join(snapshot_path, 'final_model.pth')
+    
+    if not os.path.exists(save_mode_path):
+        raise FileNotFoundError(f"Model not found at {save_mode_path}")
+    
+    # Load checkpoint (handle both old and new checkpoint formats)
+    checkpoint = torch.load(save_mode_path)
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        net.load_state_dict(checkpoint['model_state_dict'])
+        print(f"Loaded model from checkpoint (iter: {checkpoint.get('iteration', 'N/A')}, dice: {checkpoint.get('best_performance', 'N/A')})")
+    else:
+        net.load_state_dict(checkpoint)
+    
     print("init weight from {}".format(save_mode_path))
     net.eval()
 
@@ -107,11 +142,20 @@ def Inference(FLAGS):
         third_total += np.asarray(third_metric)
     avg_metric = [first_total / len(image_list), second_total /
                   len(image_list), third_total / len(image_list)]
-    return avg_metric
+    return avg_metric, snapshot_path
 
 
 if __name__ == '__main__':
     FLAGS = parser.parse_args()
-    metric = Inference(FLAGS)
-    print(metric)
-    print((metric[0]+metric[1]+metric[2])/3)
+    metric, model_path = Inference(FLAGS)
+    print("\n" + "="*50)
+    print("TEST RESULTS")
+    print("="*50)
+    print(f"Model: {model_path}")
+    print(f"Class 1 (RV):  Dice={metric[0][0]:.4f}, HD95={metric[0][1]:.4f}, ASD={metric[0][2]:.4f}")
+    print(f"Class 2 (Myo): Dice={metric[1][0]:.4f}, HD95={metric[1][1]:.4f}, ASD={metric[1][2]:.4f}")
+    print(f"Class 3 (LV):  Dice={metric[2][0]:.4f}, HD95={metric[2][1]:.4f}, ASD={metric[2][2]:.4f}")
+    print("-"*50)
+    avg = (metric[0]+metric[1]+metric[2])/3
+    print(f"Average:       Dice={avg[0]:.4f}, HD95={avg[1]:.4f}, ASD={avg[2]:.4f}")
+    print("="*50)
