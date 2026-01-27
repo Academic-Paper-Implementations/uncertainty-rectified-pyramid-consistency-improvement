@@ -411,8 +411,10 @@ if __name__ == "__main__":
     print(f"Model and logs will be saved to: {snapshot_path}")
     print(f"="*50)
     
-    if not os.path.exists(snapshot_path):
-        os.makedirs(snapshot_path)
+    # Create directory (and all parent directories) before training
+    os.makedirs(snapshot_path, exist_ok=True)
+    print(f"✓ Directory created: {snapshot_path}")
+    
     if os.path.exists(snapshot_path + '/code'):
         shutil.rmtree(snapshot_path + '/code')
     shutil.copytree('.', snapshot_path + '/code',
