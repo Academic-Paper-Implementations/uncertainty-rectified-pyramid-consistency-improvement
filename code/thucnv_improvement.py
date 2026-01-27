@@ -59,6 +59,11 @@ parser.add_argument('--consistency', type=float,
 parser.add_argument('--consistency_rampup', type=float,
                     default=200.0, help='consistency_rampup')
 
+# Output path for saving model and logs
+parser.add_argument('--output_path', type=str,
+                    default='/kaggle/working/model',
+                    help='path to save model weights and logs (default for Kaggle)')
+
 # New: Attention fusion arguments
 parser.add_argument('--use_attention_fusion', type=int, default=1,
                     help='whether to use attention-based multi-scale fusion')
@@ -338,6 +343,7 @@ def train(args, snapshot_path):
                     }
                     torch.save(checkpoint, save_mode_path)
                     torch.save(checkpoint, save_best)
+                    logging.info(f"New best model saved! Dice: {best_performance:.4f}")
 
                 logging.info(
                     'iteration %d : mean_dice : %f mean_hd95 : %f' % (iter_num, performance, mean_hd95))
@@ -361,6 +367,25 @@ def train(args, snapshot_path):
         if iter_num >= max_iterations:
             iterator.close()
             break
+    
+    # ============== SAVE FINAL MODEL ==============
+    # Always save the final model when training completes
+    save_final_path = os.path.join(snapshot_path, 'final_model.pth')
+    checkpoint = {
+        'model_state_dict': model.state_dict(),
+        'attention_fusion_state_dict': attention_fusion.state_dict() if attention_fusion else None,
+        'iteration': iter_num,
+        'best_performance': best_performance
+    }
+    torch.save(checkpoint, save_final_path)
+    logging.info("=" * 50)
+    logging.info("Training Finished!")
+    logging.info(f"Final model saved to: {save_final_path}")
+    logging.info(f"Best performance (Dice): {best_performance}")
+    logging.info(f"Total iterations: {iter_num}")
+    logging.info("=" * 50)
+    # ==============================================
+    
     writer.close()
     return "Training Finished!"
 
@@ -378,8 +403,14 @@ if __name__ == "__main__":
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
 
-    snapshot_path = "../model/{}_{}_labeled/{}".format(
-        args.exp, args.labeled_num, args.model)
+    # Use output_path argument for saving model
+    snapshot_path = os.path.join(args.output_path, "{}_{}_labeled".format(
+        args.exp, args.labeled_num), args.model)
+    
+    print(f"="*50)
+    print(f"Model and logs will be saved to: {snapshot_path}")
+    print(f"="*50)
+    
     if not os.path.exists(snapshot_path):
         os.makedirs(snapshot_path)
     if os.path.exists(snapshot_path + '/code'):
