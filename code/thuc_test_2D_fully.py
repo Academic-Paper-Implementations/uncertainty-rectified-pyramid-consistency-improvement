@@ -54,7 +54,7 @@ def test_single_volume(case, net, test_save_path, FLAGS):
             0).unsqueeze(0).float().cuda()
         net.eval()
         with torch.no_grad():
-            if FLAGS.model == "unet_urds":
+            if FLAGS.model in ["unet_urds", "unet_urpc"]:
                 out_main, _, _, _ = net(input)
             else:
                 out_main = net(input)
