@@ -137,3 +137,9 @@ model/
 # test file
 code/test.py
 test.py
+.cursor-server
+.windsurf-server
+.wget-hsts
+.vscode-server
+.lightning_studio
+.idea/this_studio.iml
