@@ -25,6 +25,7 @@ from dataloaders.dataset import BaseDataSets, RandomGenerator, TwoStreamBatchSam
 from utils import losses, metrics, ramps
 from val_2D import test_single_volume_ds
 from networks.net_factory import net_factory
+from networks.attention_fusion import MultiScaleAttentionFusion, LightweightAttentionFusion
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str,
@@ -34,7 +35,7 @@ parser.add_argument('--exp', type=str,
 parser.add_argument('--model', type=str,
                     default='unet_urpc', help='model_name')
 parser.add_argument('--max_iterations', type=int,
-                    default=30000, help='maximum epoch number to train')
+                    default=1000, help='maximum epoch number to train')
 parser.add_argument('--batch_size', type=int, default=24,
                     help='batch_size per gpu')
 parser.add_argument('--deterministic', type=int,  default=1,
@@ -57,6 +58,16 @@ parser.add_argument('--consistency', type=float,
                     default=0.1, help='consistency')
 parser.add_argument('--consistency_rampup', type=float,
                     default=200.0, help='consistency_rampup')
+
+# New: Attention fusion arguments
+parser.add_argument('--use_attention_fusion', type=int, default=1,
+                    help='whether to use attention-based multi-scale fusion')
+parser.add_argument('--attention_type', type=str, default='spatial',
+                    choices=['spatial', 'lightweight'],
+                    help='type of attention fusion: spatial (per-pixel) or lightweight (global)')
+parser.add_argument('--use_uncertainty_attention', type=int, default=1,
+                    help='whether to use uncertainty to guide attention weights')
+
 args = parser.parse_args()
 
 
@@ -86,6 +97,24 @@ def train(args, snapshot_path):
 
     model = net_factory(net_type=args.model, in_chns=1,
                         class_num=num_classes)
+    
+    # Initialize attention fusion module
+    if args.use_attention_fusion:
+        if args.attention_type == 'spatial':
+            attention_fusion = MultiScaleAttentionFusion(
+                num_classes=num_classes,
+                num_scales=4,
+                use_uncertainty=args.use_uncertainty_attention
+            ).cuda()
+        else:
+            attention_fusion = LightweightAttentionFusion(
+                num_classes=num_classes,
+                num_scales=4
+            ).cuda()
+        logging.info(f"Using {args.attention_type} attention fusion with uncertainty={args.use_uncertainty_attention}")
+    else:
+        attention_fusion = None
+        logging.info("Using naive averaging for multi-scale fusion")
 
     def worker_init_fn(worker_id):
         random.seed(args.seed + worker_id)
@@ -111,8 +140,16 @@ def train(args, snapshot_path):
     valloader = DataLoader(db_val, batch_size=1, shuffle=False,
                            num_workers=1)
 
-    optimizer = optim.SGD(model.parameters(), lr=base_lr,
-                          momentum=0.9, weight_decay=0.0001)
+    # Include attention fusion parameters in optimizer if using attention
+    if attention_fusion is not None:
+        optimizer = optim.SGD(
+            list(model.parameters()) + list(attention_fusion.parameters()),
+            lr=base_lr, momentum=0.9, weight_decay=0.0001
+        )
+    else:
+        optimizer = optim.SGD(model.parameters(), lr=base_lr,
+                              momentum=0.9, weight_decay=0.0001)
+    
     ce_loss = CrossEntropyLoss()
     dice_loss = losses.DiceLoss(num_classes)
 
@@ -158,8 +195,20 @@ def train(args, snapshot_path):
             supervised_loss = (loss_ce+loss_ce_aux1+loss_ce_aux2+loss_ce_aux3 +
                                loss_dice+loss_dice_aux1+loss_dice_aux2+loss_dice_aux3)/8
 
-            preds = (outputs_soft+outputs_aux1_soft +
-                     outputs_aux2_soft+outputs_aux3_soft)/4
+            # ============== IMPROVEMENT: Multi-Scale Attention Fusion ==============
+            # Instead of naive averaging: preds = (p1 + p2 + p3 + p4) / 4
+            # We use learned attention weights: preds = w1*p1 + w2*p2 + w3*p3 + w4*p4
+            
+            predictions_list = [outputs_soft, outputs_aux1_soft, outputs_aux2_soft, outputs_aux3_soft]
+            
+            if attention_fusion is not None:
+                preds, attention_weights = attention_fusion(predictions_list)
+            else:
+                # Fallback to naive averaging
+                preds = (outputs_soft + outputs_aux1_soft + 
+                         outputs_aux2_soft + outputs_aux3_soft) / 4
+                attention_weights = None
+            # ========================================================================
 
             variance_main = torch.sum(kl_distance(
                 torch.log(outputs_soft[args.labeled_bs:]), preds[args.labeled_bs:]), dim=1, keepdim=True)
@@ -219,6 +268,18 @@ def train(args, snapshot_path):
                               consistency_loss, iter_num)
             writer.add_scalar('info/consistency_weight',
                               consistency_weight, iter_num)
+            
+            # Log attention weights statistics
+            if attention_weights is not None and iter_num % 20 == 0:
+                if len(attention_weights.shape) == 4:  # Spatial attention
+                    for i in range(4):
+                        avg_weight = attention_weights[:, i, :, :].mean().item()
+                        writer.add_scalar(f'attention/scale_{i}_weight', avg_weight, iter_num)
+                else:  # Lightweight attention
+                    for i in range(4):
+                        avg_weight = attention_weights[:, i].mean().item()
+                        writer.add_scalar(f'attention/scale_{i}_weight', avg_weight, iter_num)
+            
             logging.info(
                 'iteration %d : loss : %f, loss_ce: %f, loss_dice: %f' %
                 (iter_num, loss.item(), loss_ce.item(), loss_dice.item()))
@@ -232,9 +293,17 @@ def train(args, snapshot_path):
                                  outputs[1, ...] * 50, iter_num)
                 labs = label_batch[1, ...].unsqueeze(0) * 50
                 writer.add_image('train/GroundTruth', labs, iter_num)
+                
+                # Visualize attention weights
+                if attention_weights is not None and len(attention_weights.shape) == 4:
+                    for i in range(4):
+                        writer.add_image(f'attention/scale_{i}_weights',
+                                        attention_weights[1, i:i+1, :, :], iter_num)
 
             if iter_num > 0 and iter_num % 200 == 0:
                 model.eval()
+                if attention_fusion is not None:
+                    attention_fusion.eval()
                 metric_list = 0.0
                 for i_batch, sampled_batch in enumerate(valloader):
                     metric_i = test_single_volume_ds(
@@ -260,17 +329,31 @@ def train(args, snapshot_path):
                                                       iter_num, round(best_performance, 4)))
                     save_best = os.path.join(snapshot_path,
                                              '{}_best_model.pth'.format(args.model))
-                    torch.save(model.state_dict(), save_mode_path)
-                    torch.save(model.state_dict(), save_best)
+                    # Save both model and attention fusion module
+                    checkpoint = {
+                        'model_state_dict': model.state_dict(),
+                        'attention_fusion_state_dict': attention_fusion.state_dict() if attention_fusion else None,
+                        'iteration': iter_num,
+                        'best_performance': best_performance
+                    }
+                    torch.save(checkpoint, save_mode_path)
+                    torch.save(checkpoint, save_best)
 
                 logging.info(
                     'iteration %d : mean_dice : %f mean_hd95 : %f' % (iter_num, performance, mean_hd95))
                 model.train()
+                if attention_fusion is not None:
+                    attention_fusion.train()
 
             if iter_num % 3000 == 0:
                 save_mode_path = os.path.join(
                     snapshot_path, 'iter_' + str(iter_num) + '.pth')
-                torch.save(model.state_dict(), save_mode_path)
+                checkpoint = {
+                    'model_state_dict': model.state_dict(),
+                    'attention_fusion_state_dict': attention_fusion.state_dict() if attention_fusion else None,
+                    'iteration': iter_num
+                }
+                torch.save(checkpoint, save_mode_path)
                 logging.info("save model to {}".format(save_mode_path))
 
             if iter_num >= max_iterations:
