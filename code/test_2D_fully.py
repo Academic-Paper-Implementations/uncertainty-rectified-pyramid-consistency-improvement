@@ -31,9 +31,16 @@ parser.add_argument('--labeled_num', type=int, default=3,
 def calculate_metric_percase(pred, gt):
     pred[pred > 0] = 1
     gt[gt > 0] = 1
+    # Handle trường hợp prediction hoặc ground truth rỗng
+    if pred.sum() == 0 or gt.sum() == 0:
+        return 0.0, 100.0, 100.0
     dice = metric.binary.dc(pred, gt)
-    asd = metric.binary.asd(pred, gt)
-    hd95 = metric.binary.hd95(pred, gt)
+    try:
+        asd = metric.binary.asd(pred, gt)
+        hd95 = metric.binary.hd95(pred, gt)
+    except:
+        asd = 100.0
+        hd95 = 100.0
     return dice, hd95, asd
 
 

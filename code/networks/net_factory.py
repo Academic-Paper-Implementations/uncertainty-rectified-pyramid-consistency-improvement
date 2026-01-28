@@ -68,7 +68,7 @@ parser.add_argument('--consistency', type=float,
                     default=0.1, help='consistency')
 parser.add_argument('--consistency_rampup', type=float,
                     default=200.0, help='consistency_rampup')
-args = parser.parse_args()
+args, _ = parser.parse_known_args()  # Use parse_known_args to ignore unknown arguments
 config = get_config(args)
 
 

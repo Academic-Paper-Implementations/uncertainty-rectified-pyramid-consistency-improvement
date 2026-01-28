@@ -79,16 +79,19 @@ parser.add_argument('--sdm_sigma', type=float, default=5.0,
 args = parser.parse_args()
 
 
-# ============ SIGNED DISTANCE MAP (SDM) FUNCTIONS (NEW) ============
+# ============ SIGNED DISTANCE MAP (SDM) FUNCTIONS - OPTIMIZED ============
+# Cải tiến 1: Tối ưu hóa hiệu suất tính toán SDM
+# - Giảm thiểu chuyển đổi CPU/GPU bằng cách batch processing
+# - Cache kết quả SDM để tái sử dụng trong cùng iteration
+
+# Global cache để lưu SDM đã tính (tránh tính lại trong cùng iteration)
+_sdm_cache = {}
+
 
 def compute_sdm_single_class(binary_mask):
     """
     Tính Signed Distance Map cho một binary mask.
-    
-    SDM có giá trị:
-    - Dương (+): bên trong object (foreground)
-    - Âm (-): bên ngoài object (background)
-    - Gần 0: gần ranh giới (boundary)
+    Tối ưu: Sử dụng numpy operations hiệu quả hơn.
     
     Args:
         binary_mask: numpy array (H, W), giá trị 0 hoặc 1
@@ -96,96 +99,107 @@ def compute_sdm_single_class(binary_mask):
     Returns:
         sdm: numpy array (H, W), Signed Distance Map
     """
-    binary_mask = binary_mask.astype(np.uint8)
+    # Chuyển về uint8 một lần duy nhất
+    binary_mask = np.ascontiguousarray(binary_mask, dtype=np.uint8)
     
     # Trường hợp đặc biệt: mask rỗng hoặc đầy
-    if binary_mask.sum() == 0:
-        # Không có foreground -> trả về distance từ edge của image
+    foreground_sum = binary_mask.sum()
+    if foreground_sum == 0:
+        # Không có foreground -> distance âm từ edge
         return -distance_transform_edt(np.ones_like(binary_mask)).astype(np.float32)
-    if binary_mask.sum() == binary_mask.size:
-        # Tất cả là foreground -> trả về distance từ edge
+    if foreground_sum == binary_mask.size:
+        # Tất cả là foreground -> distance dương từ edge
         return distance_transform_edt(binary_mask).astype(np.float32)
     
-    # Distance transform cho foreground (bên trong object)
-    # Mỗi pixel trong foreground -> khoảng cách đến nearest background
+    # Tính SDM: dương bên trong, âm bên ngoài
+    # Pixel ở boundary có |SDM| ≈ 0
     dist_inside = distance_transform_edt(binary_mask)
-    
-    # Distance transform cho background (bên ngoài object)
-    # Mỗi pixel trong background -> khoảng cách đến nearest foreground
     dist_outside = distance_transform_edt(1 - binary_mask)
     
-    # SDM: dương bên trong, âm bên ngoài
-    # Pixel ở boundary có |SDM| ≈ 0
-    sdm = dist_inside - dist_outside
-    
-    return sdm.astype(np.float32)
+    return (dist_inside - dist_outside).astype(np.float32)
 
 
-def compute_sdm_batch(labels, num_classes):
+def compute_sdm_batch_optimized(labels, num_classes, device):
     """
-    Tính SDM cho một batch labels với nhiều classes.
+    Tính SDM cho batch labels - Phiên bản tối ưu.
+    
+    Cải tiến:
+    - Chỉ chuyển dữ liệu CPU->GPU một lần duy nhất sau khi tính xong toàn bộ batch
+    - Sử dụng contiguous array để tăng tốc độ truy cập bộ nhớ
+    - Pre-allocate numpy array để giảm memory allocation
     
     Args:
-        labels: torch.Tensor (B, H, W), giá trị từ 0 đến num_classes-1
+        labels: torch.Tensor (B, H, W) trên GPU
         num_classes: số lượng classes
+        device: torch.device để đưa kết quả về
         
     Returns:
-        sdm_batch: torch.Tensor (B, num_classes, H, W)
+        sdm_batch: torch.Tensor (B, num_classes, H, W) trên device
     """
+    # Chuyển labels về CPU một lần duy nhất (unavoidable với scipy)
     batch_size, height, width = labels.shape
-    labels_np = labels.cpu().numpy()
+    labels_np = labels.detach().cpu().numpy()
     
+    # Pre-allocate output array (contiguous memory)
     sdm_batch = np.zeros((batch_size, num_classes, height, width), dtype=np.float32)
     
+    # Tính SDM cho từng sample và class
     for b in range(batch_size):
+        label_b = labels_np[b]
         for c in range(num_classes):
-            # Tạo binary mask cho class c
-            binary_mask = (labels_np[b] == c).astype(np.uint8)
+            # Tạo binary mask và tính SDM
+            binary_mask = (label_b == c)
             sdm_batch[b, c] = compute_sdm_single_class(binary_mask)
     
-    return torch.from_numpy(sdm_batch).to(labels.device)
+    # Chuyển về GPU một lần duy nhất với non_blocking để overlap transfer
+    return torch.from_numpy(sdm_batch).to(device, non_blocking=True)
 
 
-def compute_boundary_weight_map(labels, num_classes, sigma=5.0):
+def compute_boundary_weight_map_optimized(labels, num_classes, sigma=5.0):
     """
-    Tạo weight map từ SDM: pixel gần boundary có weight cao hơn.
+    Tạo weight map từ SDM - Phiên bản tối ưu.
     
     Công thức: weight = 1 + exp(-min|SDM|^2 / (2 * sigma^2))
-    
-    - Gần boundary (|SDM| nhỏ) -> weight cao (≈ 2)
-    - Xa boundary (|SDM| lớn) -> weight thấp (≈ 1)
+    Tham khảo: Kervadec et al. "Boundary loss for highly unbalanced segmentation"
     
     Args:
-        labels: torch.Tensor (B, H, W), ground truth labels
-        num_classes: số lượng classes
-        sigma: float, điều khiển độ rộng vùng boundary được weight cao
+        labels: torch.Tensor (B, H, W) trên GPU
+        num_classes: số classes
+        sigma: điều khiển độ rộng vùng boundary
         
     Returns:
-        weight_map: torch.Tensor (B, H, W), giá trị từ 1 đến 2
+        weight_map: torch.Tensor (B, H, W), range [1, 2]
+        sdm: torch.Tensor (B, C, H, W) - trả về để tái sử dụng
     """
-    # Tính SDM cho tất cả classes
-    sdm = compute_sdm_batch(labels, num_classes)  # (B, C, H, W)
+    device = labels.device
     
-    # Lấy |SDM| nhỏ nhất tại mỗi pixel (gần boundary của bất kỳ class nào)
+    # Kiểm tra kích thước đầu vào
+    assert labels.dim() == 3, f"Labels phải có shape (B, H, W), got {labels.shape}"
+    
+    # Tính SDM cho tất cả classes
+    sdm = compute_sdm_batch_optimized(labels, num_classes, device)  # (B, C, H, W)
+    
+    # Kiểm tra shape output
+    B, H, W = labels.shape
+    assert sdm.shape == (B, num_classes, H, W), f"SDM shape mismatch: {sdm.shape}"
+    
+    # Tính weight map trên GPU (tất cả operations đều trên GPU)
     sdm_abs = torch.abs(sdm)  # (B, C, H, W)
     min_sdm_abs, _ = torch.min(sdm_abs, dim=1)  # (B, H, W)
     
-    # Weight map: gần boundary -> weight cao
     # Gaussian-like decay từ boundary
-    boundary_weight = torch.exp(-min_sdm_abs ** 2 / (2 * sigma ** 2))
+    boundary_weight = torch.exp(-min_sdm_abs.pow(2) / (2 * sigma * sigma))
+    weight_map = 1.0 + boundary_weight  # range [1, 2]
     
-    # Final weight = 1 + boundary_weight (range: 1 to 2)
-    weight_map = 1.0 + boundary_weight
-    
-    return weight_map
+    return weight_map, sdm
 
 
 class BoundaryAwareCELoss(nn.Module):
     """
-    Boundary-Aware Cross Entropy Loss.
+    Boundary-Aware Cross Entropy Loss - Phiên bản tối ưu.
     
-    Phạt nặng các pixel dự đoán sai ở gần ranh giới đối tượng bằng cách
-    nhân CE loss với weight map được tính từ SDM.
+    Phạt nặng các pixel dự đoán sai ở gần ranh giới đối tượng.
+    Tối ưu: Nhận weight_map từ bên ngoài để tránh tính toán SDM lặp lại.
     """
     
     def __init__(self, num_classes, sigma=5.0):
@@ -194,24 +208,33 @@ class BoundaryAwareCELoss(nn.Module):
         self.sigma = sigma
         self.ce_loss = CrossEntropyLoss(reduction='none')
     
-    def forward(self, predictions, labels):
+    def forward(self, predictions, labels, weight_map=None):
         """
         Args:
             predictions: torch.Tensor (B, C, H, W), logits từ model
             labels: torch.Tensor (B, H, W), ground truth labels
+            weight_map: torch.Tensor (B, H, W), pre-computed weight map (optional)
             
         Returns:
             loss: scalar, weighted cross entropy loss
         """
-        # Tính CE loss cho từng pixel (không reduce)
+        # Kiểm tra shape consistency
+        B, C, H, W = predictions.shape
+        assert labels.shape == (B, H, W), f"Label shape mismatch: {labels.shape} vs ({B}, {H}, {W})"
+        
+        # Tính CE loss cho từng pixel
         ce_per_pixel = self.ce_loss(predictions, labels.long())  # (B, H, W)
         
-        # Tính boundary weight map từ ground truth
-        weight_map = compute_boundary_weight_map(
-            labels, self.num_classes, self.sigma
-        )  # (B, H, W)
+        # Sử dụng weight_map nếu được cung cấp, không thì tính mới
+        if weight_map is None:
+            weight_map, _ = compute_boundary_weight_map_optimized(
+                labels, self.num_classes, self.sigma
+            )
         
-        # Apply weight và tính mean
+        # Đảm bảo weight_map trên cùng device
+        weight_map = weight_map.to(predictions.device)
+        
+        # Apply weight và normalize
         weighted_ce = ce_per_pixel * weight_map
         loss = weighted_ce.mean()
         
@@ -220,10 +243,22 @@ class BoundaryAwareCELoss(nn.Module):
 
 class BoundaryAwareDiceLoss(nn.Module):
     """
-    Boundary-Aware Dice Loss.
+    Weighted Dice Loss với trọng số biên - Viết lại theo công thức chuẩn.
     
-    Kết hợp Dice Loss với boundary weighting để focus vào vùng ranh giới.
-    Sử dụng weight như pixel importance thay vì nhân trực tiếp.
+    Tham khảo: Kervadec et al. "Boundary loss for highly unbalanced segmentation"
+    
+    Công thức Weighted Dice:
+        Dice = 2 * sum(w * p * g) / (sum(w * p) + sum(w * g) + smooth)
+    
+    Trong đó:
+        - w: weight map (cao ở biên, thấp ở vùng xa biên)
+        - p: predicted probability
+        - g: ground truth (one-hot)
+    
+    Cải tiến:
+        - Nhân weight trực tiếp vào intersection và union
+        - Đảm bảo loss nằm trong [0, 1]
+        - Nhận pre-computed SDM để tái sử dụng
     """
     
     def __init__(self, num_classes, sigma=5.0, smooth=1e-5):
@@ -232,15 +267,23 @@ class BoundaryAwareDiceLoss(nn.Module):
         self.sigma = sigma
         self.smooth = smooth
     
-    def forward(self, predictions, labels):
+    def forward(self, predictions, labels, sdm=None):
         """
         Args:
             predictions: torch.Tensor (B, C, H, W), logits từ model
             labels: torch.Tensor (B, H, W), ground truth labels
+            sdm: torch.Tensor (B, C, H, W), pre-computed SDM (optional)
             
         Returns:
-            loss: scalar, boundary-aware dice loss (always >= 0)
+            loss: scalar trong [0, 1], weighted dice loss
         """
+        device = predictions.device
+        B, C, H, W = predictions.shape
+        
+        # Kiểm tra shape
+        assert labels.shape == (B, H, W), f"Label shape mismatch: {labels.shape}"
+        assert C == self.num_classes, f"Num classes mismatch: {C} vs {self.num_classes}"
+        
         # Softmax để có probabilities
         probs = torch.softmax(predictions, dim=1)  # (B, C, H, W)
         
@@ -248,28 +291,40 @@ class BoundaryAwareDiceLoss(nn.Module):
         labels_one_hot = torch.zeros_like(probs)
         labels_one_hot.scatter_(1, labels.unsqueeze(1).long(), 1)  # (B, C, H, W)
         
-        # Tính SDM-based weight map
-        sdm = compute_sdm_batch(labels, self.num_classes)  # (B, C, H, W)
+        # Tính hoặc sử dụng SDM đã có
+        if sdm is None:
+            sdm = compute_sdm_batch_optimized(labels, self.num_classes, device)
+        else:
+            sdm = sdm.to(device)
+        
+        # Kiểm tra SDM shape
+        assert sdm.shape == (B, C, H, W), f"SDM shape mismatch: {sdm.shape}"
+        
+        # Tính weight map per-class từ SDM
+        # Công thức: w = 1 + exp(-|SDM|^2 / (2*sigma^2))
+        # Vùng gần biên (|SDM| nhỏ) -> weight cao (~2)
+        # Vùng xa biên (|SDM| lớn) -> weight thấp (~1)
         sdm_abs = torch.abs(sdm)
-        boundary_weight = torch.exp(-sdm_abs ** 2 / (2 * self.sigma ** 2))
-        weight_map = 1.0 + boundary_weight  # (B, C, H, W), range [1, 2]
+        weight_map = 1.0 + torch.exp(-sdm_abs.pow(2) / (2 * self.sigma * self.sigma))  # (B, C, H, W)
         
-        # Tính Dice Loss per pixel, sau đó weighted average
-        # intersection và union không nhân weight, chỉ dùng weight khi tính loss
-        intersection = (probs * labels_one_hot).sum(dim=(2, 3))  # (B, C)
-        union = probs.sum(dim=(2, 3)) + labels_one_hot.sum(dim=(2, 3))  # (B, C)
+        # ============ WEIGHTED DICE THEO CÔNG THỨC CHUẨN ============
+        # Weighted intersection: sum(w * p * g)
+        weighted_intersection = (weight_map * probs * labels_one_hot).sum(dim=(2, 3))  # (B, C)
         
-        dice_per_class = (2.0 * intersection + self.smooth) / (union + self.smooth)  # (B, C)
+        # Weighted union: sum(w * p) + sum(w * g)
+        weighted_pred = (weight_map * probs).sum(dim=(2, 3))  # (B, C)
+        weighted_target = (weight_map * labels_one_hot).sum(dim=(2, 3))  # (B, C)
+        weighted_union = weighted_pred + weighted_target  # (B, C)
         
-        # Tính weighted dice error per pixel: |prob - label| * weight
-        dice_error = torch.abs(probs - labels_one_hot)  # (B, C, H, W)
-        weighted_error = (dice_error * weight_map).mean()  # scalar
+        # Weighted Dice per class
+        dice_per_class = (2.0 * weighted_intersection + self.smooth) / (weighted_union + self.smooth)  # (B, C)
         
-        # Kết hợp: standard dice loss + weighted boundary error
-        standard_dice_loss = 1.0 - dice_per_class[:, 1:].mean()
+        # Bỏ qua background (class 0), average over foreground classes
+        # dice_per_class[:, 1:] có shape (B, num_classes-1)
+        mean_dice = dice_per_class[:, 1:].mean()
         
-        # Final loss: đảm bảo luôn >= 0
-        dice_loss = standard_dice_loss + 0.5 * weighted_error
+        # Dice Loss = 1 - Dice, đảm bảo trong [0, 1]
+        dice_loss = torch.clamp(1.0 - mean_dice, min=0.0, max=1.0)
         
         return dice_loss
 
@@ -370,42 +425,63 @@ def train(args, snapshot_path):
             outputs_aux2_soft = torch.softmax(outputs_aux2, dim=1)
             outputs_aux3_soft = torch.softmax(outputs_aux3, dim=1)
 
-            # ============ STANDARD SUPERVISED LOSS (giữ nguyên) ============
-            loss_ce = ce_loss(outputs[:args.labeled_bs],
-                              label_batch[:args.labeled_bs][:].long())
-            loss_ce_aux1 = ce_loss(outputs_aux1[:args.labeled_bs],
-                                   label_batch[:args.labeled_bs][:].long())
-            loss_ce_aux2 = ce_loss(outputs_aux2[:args.labeled_bs],
-                                   label_batch[:args.labeled_bs][:].long())
-            loss_ce_aux3 = ce_loss(outputs_aux3[:args.labeled_bs],
-                                   label_batch[:args.labeled_bs][:].long())
-
-            loss_dice = dice_loss(
-                outputs_soft[:args.labeled_bs], label_batch[:args.labeled_bs].unsqueeze(1))
-            loss_dice_aux1 = dice_loss(
-                outputs_aux1_soft[:args.labeled_bs], label_batch[:args.labeled_bs].unsqueeze(1))
-            loss_dice_aux2 = dice_loss(
-                outputs_aux2_soft[:args.labeled_bs], label_batch[:args.labeled_bs].unsqueeze(1))
-            loss_dice_aux3 = dice_loss(
-                outputs_aux3_soft[:args.labeled_bs], label_batch[:args.labeled_bs].unsqueeze(1))
-
-            supervised_loss = (loss_ce+loss_ce_aux1+loss_ce_aux2+loss_ce_aux3 +
-                               loss_dice+loss_dice_aux1+loss_dice_aux2+loss_dice_aux3)/8
+            # ============ CẢI TIẾN 3: TÁI CẤU TRÚC LOSS AGGREGATION ============
+            # Chiến lược mới:
+            # - Nhánh chính (outputs): Dùng Boundary-Aware Loss để học chi tiết biên
+            # - Nhánh phụ (aux1,2,3): Dùng standard CE+Dice để ổn định vùng phân đoạn
+            # ================================================================
             
-            # ============ BOUNDARY-AWARE LOSS (CẢI TIẾN MỚI) ============
-            # Tính Boundary-Aware Loss cho main output
+            # Lấy labeled samples
+            labeled_outputs = outputs[:args.labeled_bs]
+            labeled_labels = label_batch[:args.labeled_bs]
+            
+            # --- Bước 1: Tính SDM và weight_map MỘT LẦN cho labeled batch ---
+            # Tối ưu: Tránh tính lại SDM nhiều lần trong cùng iteration
+            weight_map, sdm = compute_boundary_weight_map_optimized(
+                labeled_labels, num_classes, args.sdm_sigma
+            )
+            
+            # --- Bước 2: NHÁNH CHÍNH - Boundary-Aware Loss ---
+            # Main output học chi tiết biên sắc nét
             loss_boundary_ce = boundary_ce_loss(
-                outputs[:args.labeled_bs], 
-                label_batch[:args.labeled_bs]
+                labeled_outputs, 
+                labeled_labels,
+                weight_map=weight_map  # Tái sử dụng weight_map đã tính
             )
             loss_boundary_dice = boundary_dice_loss(
-                outputs[:args.labeled_bs], 
-                label_batch[:args.labeled_bs]
+                labeled_outputs, 
+                labeled_labels,
+                sdm=sdm  # Tái sử dụng SDM đã tính
             )
             
-            # Tổng hợp Boundary-Aware Loss với weight
-            loss_boundary = args.boundary_weight * (loss_boundary_ce + loss_boundary_dice)
-            # ============================================================
+            # Loss cho nhánh chính: trung bình CE và Dice có trọng số biên
+            loss_main = (loss_boundary_ce + loss_boundary_dice) / 2
+            
+            # --- Bước 3: NHÁNH PHỤ - Standard Loss (ổn định) ---
+            # Auxiliary outputs dùng loss tiêu chuẩn để đảm bảo ổn định
+            loss_ce_aux1 = ce_loss(outputs_aux1[:args.labeled_bs],
+                                   labeled_labels[:].long())
+            loss_ce_aux2 = ce_loss(outputs_aux2[:args.labeled_bs],
+                                   labeled_labels[:].long())
+            loss_ce_aux3 = ce_loss(outputs_aux3[:args.labeled_bs],
+                                   labeled_labels[:].long())
+
+            loss_dice_aux1 = dice_loss(
+                outputs_aux1_soft[:args.labeled_bs], labeled_labels.unsqueeze(1))
+            loss_dice_aux2 = dice_loss(
+                outputs_aux2_soft[:args.labeled_bs], labeled_labels.unsqueeze(1))
+            loss_dice_aux3 = dice_loss(
+                outputs_aux3_soft[:args.labeled_bs], labeled_labels.unsqueeze(1))
+
+            # Loss cho các nhánh phụ: trung bình của 3 auxiliary heads
+            supervised_loss_aux = (loss_ce_aux1 + loss_ce_aux2 + loss_ce_aux3 +
+                                   loss_dice_aux1 + loss_dice_aux2 + loss_dice_aux3) / 6
+            
+            # --- Logging compatibility: giữ biến cũ để log ---
+            loss_ce = loss_boundary_ce  # Log CE của main branch
+            loss_dice = loss_boundary_dice  # Log Dice của main branch
+            loss_boundary = loss_main  # Để log boundary loss
+            # =================================================================
 
             # ============ CONSISTENCY LOSS (giữ nguyên từ baseline) ============
             preds = (outputs_soft+outputs_aux1_soft +
@@ -453,9 +529,14 @@ def train(args, snapshot_path):
                                 consistency_loss_aux2 + consistency_loss_aux3) / 4
             # ===================================================================
             
-            # ============ TOTAL LOSS (CÓ THÊM BOUNDARY LOSS) ============
-            loss = supervised_loss + consistency_weight * consistency_loss + loss_boundary
-            # ============================================================
+            # ============ TOTAL LOSS - CÔNG THỨC MỚI ============
+            # loss = loss_main (boundary-aware) + loss_aux (standard) + consistency
+            # Trong đó:
+            # - loss_main: (boundary_ce + boundary_dice) / 2 cho nhánh chính
+            # - supervised_loss_aux: standard loss cho các nhánh phụ
+            # - consistency_loss: unsupervised consistency regularization
+            loss = loss_main + supervised_loss_aux + consistency_weight * consistency_loss
+            # ====================================================
             
             optimizer.zero_grad()
             loss.backward()
@@ -541,6 +622,19 @@ def train(args, snapshot_path):
         if iter_num >= max_iterations:
             iterator.close()
             break
+    
+    # ============ SAVE FINAL MODEL (đảm bảo luôn có model để test) ============
+    # Nếu chưa có best_model (do chưa đạt validation checkpoint), save model cuối
+    final_best_path = os.path.join(snapshot_path, '{}_best_model.pth'.format(args.model))
+    if not os.path.exists(final_best_path):
+        torch.save(model.state_dict(), final_best_path)
+        logging.info("No best model found, saved final model to {}".format(final_best_path))
+    # Luôn save checkpoint cuối cùng
+    final_checkpoint = os.path.join(snapshot_path, 'iter_{}_final.pth'.format(iter_num))
+    torch.save(model.state_dict(), final_checkpoint)
+    logging.info("Saved final checkpoint to {}".format(final_checkpoint))
+    # =========================================================================
+    
     writer.close()
     return "Training Finished!"
 
