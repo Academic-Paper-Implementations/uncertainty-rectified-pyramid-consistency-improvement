@@ -1,11 +1,14 @@
 """
-URPC with Boundary-Aware Loss (SDM Integration)
-===============================================
+URPC with Boundary-Aware Loss + Multi-Scale Attention Fusion (PP4 + PP1)
+========================================================================
 Author: KhangPX
 Based on: train_uncertainty_rectified_pyramid_consistency_2D.py
 
-Improvement: Tích hợp Signed Distance Map (SDM) để tạo Boundary-Aware Loss,
-phạt nặng các pixel dự đoán sai ở gần ranh giới đối tượng.
+Improvements:
+  - PP4: Tích hợp Signed Distance Map (SDM) để tạo Boundary-Aware Loss,
+         phạt nặng các pixel dự đoán sai ở gần ranh giới đối tượng.
+  - PP1: Multi-Scale Attention Fusion thay thế naive averaging,
+         học trọng số attention cho từng scale prediction.
 """
 
 import argparse
@@ -41,7 +44,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str,
                     default='../data/ACDC/ACDC', help='Name of Experiment')
 parser.add_argument('--exp', type=str,
-                    default='ACDC/URPC_Boundary_Aware', help='experiment_name')
+                    default='ACDC/URPC_BoundaryAware_AttentionFusion', help='experiment_name')
 parser.add_argument('--model', type=str,
                     default='unet_urpc', help='model_name')
 parser.add_argument('--max_iterations', type=int,
@@ -277,6 +280,76 @@ class BoundaryAwareDiceLoss(nn.Module):
 # ==================================================================
 
 
+# ============ MULTI-SCALE ATTENTION FUSION MODULE (PP1 - NEW) ============
+
+class MultiScaleAttentionFusion(nn.Module):
+    """
+    Multi-Scale Attention Fusion Module (PP1).
+    
+    Thay thế phép trung bình cộng đơn giản (naive averaging) bằng 
+    attention weights được học cho từng scale prediction.
+    
+    Kiến trúc URPC tạo 4 predictions ở các scale khác nhau:
+    - dp0 (shallowest): giỏi chi tiết biên (boundary detail)
+    - dp1, dp2: trung gian
+    - dp3 (deepest): giỏi ngữ nghĩa (semantic understanding)
+    
+    Module này học trọng số w_s cho từng scale tại mỗi pixel,
+    cho phép kết hợp tối ưu thay vì coi mọi scale đều quan trọng như nhau.
+    """
+    
+    def __init__(self, num_classes, num_scales=4):
+        super(MultiScaleAttentionFusion, self).__init__()
+        self.num_scales = num_scales
+        self.num_classes = num_classes
+        
+        # Input: concatenation of all scale predictions (num_scales * num_classes channels)
+        # Output: attention weight per scale per pixel (num_scales channels)
+        in_channels = num_scales * num_classes
+        
+        self.attention_net = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels // 2, kernel_size=1, bias=False),
+            nn.BatchNorm2d(in_channels // 2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels // 2, num_scales, kernel_size=1, bias=True),
+        )
+        
+        # Initialize near-zero so initial behavior = uniform averaging
+        nn.init.zeros_(self.attention_net[-1].weight)
+        nn.init.zeros_(self.attention_net[-1].bias)
+    
+    def forward(self, predictions_list):
+        """
+        Args:
+            predictions_list: list of 4 tensors, each (B, C, H, W) softmax outputs
+            
+        Returns:
+            fused: (B, C, H, W) - attention-weighted fusion of all scales
+            attention_weights: (B, num_scales, H, W) - learned weights per pixel
+        """
+        # Concatenate all scale predictions: (B, num_scales * C, H, W)
+        concat = torch.cat(predictions_list, dim=1)
+        
+        # Compute attention logits: (B, num_scales, H, W)
+        attention_logits = self.attention_net(concat)
+        
+        # Softmax over scales dimension -> normalized weights summing to 1
+        attention_weights = torch.softmax(attention_logits, dim=1)
+        
+        # Stack predictions: (B, num_scales, C, H, W)
+        stacked = torch.stack(predictions_list, dim=1)
+        
+        # Expand weights for broadcasting: (B, num_scales, 1, H, W)
+        weights_expanded = attention_weights.unsqueeze(2)
+        
+        # Weighted sum across scales: (B, C, H, W)
+        fused = (stacked * weights_expanded).sum(dim=1)
+        
+        return fused, attention_weights
+
+# ========================================================================
+
+
 def patients_to_slices(dataset, patiens_num):
     ref_dict = None
     if "ACDC" in dataset:
@@ -304,6 +377,12 @@ def train(args, snapshot_path):
     model = net_factory(net_type=args.model, in_chns=1,
                         class_num=num_classes)
 
+    # ============ MULTI-SCALE ATTENTION FUSION (PP1 - NEW) ============
+    attention_fusion = MultiScaleAttentionFusion(
+        num_classes=num_classes, num_scales=4
+    ).cuda()
+    # ==================================================================
+
     def worker_init_fn(worker_id):
         random.seed(args.seed + worker_id)
 
@@ -328,8 +407,10 @@ def train(args, snapshot_path):
     valloader = DataLoader(db_val, batch_size=1, shuffle=False,
                            num_workers=1)
 
-    optimizer = optim.SGD(model.parameters(), lr=base_lr,
-                          momentum=0.9, weight_decay=0.0001)
+    optimizer = optim.SGD(
+        list(model.parameters()) + list(attention_fusion.parameters()),
+        lr=base_lr, momentum=0.9, weight_decay=0.0001
+    )
     
     # ============ LOSS FUNCTIONS ============
     # Standard losses (giữ nguyên từ baseline)
@@ -351,6 +432,7 @@ def train(args, snapshot_path):
     logging.info("{} iterations per epoch".format(len(trainloader)))
     logging.info("Boundary-Aware Loss enabled with weight={}, sigma={}".format(
         args.boundary_weight, args.sdm_sigma))
+    logging.info("Multi-Scale Attention Fusion enabled (replaces naive averaging)")
 
     iter_num = 0
     max_epoch = max_iterations // len(trainloader) + 1
@@ -407,9 +489,12 @@ def train(args, snapshot_path):
             loss_boundary = args.boundary_weight * (loss_boundary_ce + loss_boundary_dice)
             # ============================================================
 
-            # ============ CONSISTENCY LOSS (giữ nguyên từ baseline) ============
-            preds = (outputs_soft+outputs_aux1_soft +
-                     outputs_aux2_soft+outputs_aux3_soft)/4
+            # ============ CONSISTENCY LOSS (CÓ ATTENTION FUSION - PP1) ============
+            # PP1: Thay naive averaging bằng learned attention-weighted fusion
+            preds, attn_weights = attention_fusion([
+                outputs_soft, outputs_aux1_soft,
+                outputs_aux2_soft, outputs_aux3_soft
+            ])
 
             variance_main = torch.sum(kl_distance(
                 torch.log(outputs_soft[args.labeled_bs:]), preds[args.labeled_bs:]), dim=1, keepdim=True)
@@ -480,11 +565,17 @@ def train(args, snapshot_path):
             writer.add_scalar('info/boundary_loss', loss_boundary, iter_num)
             writer.add_scalar('info/boundary_ce_loss', loss_boundary_ce, iter_num)
             writer.add_scalar('info/boundary_dice_loss', loss_boundary_dice, iter_num)
+            # Log Attention Fusion weights (PP1 - NEW)
+            for s in range(4):
+                writer.add_scalar('info/attn_weight_scale_{}'.format(s),
+                                  attn_weights[:, s, :, :].mean().item(), iter_num)
             # ======================================================
             
             logging.info(
-                'iteration %d : loss : %f, loss_ce: %f, loss_dice: %f, boundary_loss: %f' %
-                (iter_num, loss.item(), loss_ce.item(), loss_dice.item(), loss_boundary.item()))
+                'iteration %d : loss : %f, loss_ce: %f, loss_dice: %f, boundary: %f, attn: [%.3f, %.3f, %.3f, %.3f]' %
+                (iter_num, loss.item(), loss_ce.item(), loss_dice.item(), loss_boundary.item(),
+                 attn_weights[:, 0].mean().item(), attn_weights[:, 1].mean().item(),
+                 attn_weights[:, 2].mean().item(), attn_weights[:, 3].mean().item()))
 
             if iter_num % 20 == 0:
                 image = volume_batch[1, 0:1, :, :]
@@ -571,8 +662,9 @@ if __name__ == "__main__":
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    logging.info("=" * 50)
-    logging.info("URPC with Boundary-Aware Loss (SDM Integration)")
+    logging.info("=" * 60)
+    logging.info("URPC with Boundary-Aware Loss + Multi-Scale Attention Fusion")
+    logging.info("PP4 (SDM Integration) + PP1 (Attention Fusion)")
     logging.info("Author: KhangPX")
-    logging.info("=" * 50)
+    logging.info("=" * 60)
     train(args, snapshot_path)
