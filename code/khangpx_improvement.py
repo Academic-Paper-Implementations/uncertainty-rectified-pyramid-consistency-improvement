@@ -314,9 +314,10 @@ class MultiScaleAttentionFusion(nn.Module):
             nn.Conv2d(in_channels // 2, num_scales, kernel_size=1, bias=True),
         )
         
-        # Initialize near-zero so initial behavior = uniform averaging
-        nn.init.zeros_(self.attention_net[-1].weight)
-        nn.init.zeros_(self.attention_net[-1].bias)
+        # Initialize with small random values to allow learning
+        # Small std ensures initial behavior close to uniform averaging
+        nn.init.normal_(self.attention_net[-1].weight, mean=0, std=0.01)
+        nn.init.constant_(self.attention_net[-1].bias, 0)
     
     def forward(self, predictions_list):
         """
@@ -407,10 +408,11 @@ def train(args, snapshot_path):
     valloader = DataLoader(db_val, batch_size=1, shuffle=False,
                            num_workers=1)
 
-    optimizer = optim.SGD(
-        list(model.parameters()) + list(attention_fusion.parameters()),
-        lr=base_lr, momentum=0.9, weight_decay=0.0001
-    )
+    # Use separate learning rates: attention module needs higher LR to learn
+    optimizer = optim.SGD([
+        {'params': model.parameters(), 'lr': base_lr},
+        {'params': attention_fusion.parameters(), 'lr': base_lr * 5.0}  # 5x higher LR
+    ], momentum=0.9, weight_decay=0.0001)
     
     # ============ LOSS FUNCTIONS ============
     # Standard losses (giữ nguyên từ baseline)

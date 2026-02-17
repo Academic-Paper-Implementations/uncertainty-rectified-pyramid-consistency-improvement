@@ -12,7 +12,7 @@ echo "================================================================"
 
 # Chạy với cấu hình mặc định
 python khangpx_improvement.py \
-    --root_path ../data/ACDC \
+    --root_path ../data/ACDC/ACDC \
     --exp ACDC/URPC_BoundaryAware_AttentionFusion \
     --model unet_urpc \
     --num_classes 4 \
