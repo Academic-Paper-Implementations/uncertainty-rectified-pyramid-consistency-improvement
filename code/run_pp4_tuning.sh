@@ -95,6 +95,8 @@ run_experiment() {
     echo "Running: $EXP_NAME"
     echo "  boundary_weight=$BOUNDARY_WEIGHT, sdm_sigma=$SDM_SIGMA"
     echo "  boundary_mode=$BOUNDARY_MODE, max_iter=$MAX_ITER"
+    echo "  Script: $SCRIPT_DIR/khangpx_improvement.py"
+    echo "  Python: $(which python)"
     echo "================================================================"
 
     python "$SCRIPT_DIR/khangpx_improvement.py" \

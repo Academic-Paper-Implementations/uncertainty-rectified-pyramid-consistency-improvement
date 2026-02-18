@@ -85,6 +85,10 @@ parser.add_argument('--boundary_max_weight', type=float, default=2.0,
 
 args = parser.parse_args()
 
+# Version marker - nếu thấy dòng này là đúng file PP4
+print(f"[PP4-KhangPX] Running from: {__file__}", flush=True)
+print(f"[PP4-KhangPX] boundary_weight={args.boundary_weight}, sdm_sigma={args.sdm_sigma}, mode={args.boundary_mode}", flush=True)
+
 
 # ============ SIGNED DISTANCE MAP (SDM) FUNCTIONS (NEW) ============
 
