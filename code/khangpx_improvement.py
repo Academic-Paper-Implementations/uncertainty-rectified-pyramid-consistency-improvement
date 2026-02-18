@@ -437,40 +437,52 @@ def train(args, snapshot_path):
             preds = (outputs_soft + outputs_aux1_soft +
                      outputs_aux2_soft + outputs_aux3_soft) / 4
 
+            # Clamp softmax outputs trước khi log để tránh log(0) = -inf
+            eps = 1e-6
+            outputs_soft_clamped     = torch.clamp(outputs_soft[args.labeled_bs:],     min=eps)
+            outputs_aux1_soft_clamped = torch.clamp(outputs_aux1_soft[args.labeled_bs:], min=eps)
+            outputs_aux2_soft_clamped = torch.clamp(outputs_aux2_soft[args.labeled_bs:], min=eps)
+            outputs_aux3_soft_clamped = torch.clamp(outputs_aux3_soft[args.labeled_bs:], min=eps)
+            preds_unlabeled = preds[args.labeled_bs:]
+
             variance_main = torch.sum(kl_distance(
-                torch.log(outputs_soft[args.labeled_bs:]), preds[args.labeled_bs:]), dim=1, keepdim=True)
+                torch.log(outputs_soft_clamped), preds_unlabeled), dim=1, keepdim=True)
+            variance_main = torch.clamp(variance_main, max=10.0)  # tránh exp(-inf) và mean(inf)
             exp_variance_main = torch.exp(-variance_main)
 
             variance_aux1 = torch.sum(kl_distance(
-                torch.log(outputs_aux1_soft[args.labeled_bs:]), preds[args.labeled_bs:]), dim=1, keepdim=True)
+                torch.log(outputs_aux1_soft_clamped), preds_unlabeled), dim=1, keepdim=True)
+            variance_aux1 = torch.clamp(variance_aux1, max=10.0)
             exp_variance_aux1 = torch.exp(-variance_aux1)
 
             variance_aux2 = torch.sum(kl_distance(
-                torch.log(outputs_aux2_soft[args.labeled_bs:]), preds[args.labeled_bs:]), dim=1, keepdim=True)
+                torch.log(outputs_aux2_soft_clamped), preds_unlabeled), dim=1, keepdim=True)
+            variance_aux2 = torch.clamp(variance_aux2, max=10.0)
             exp_variance_aux2 = torch.exp(-variance_aux2)
 
             variance_aux3 = torch.sum(kl_distance(
-                torch.log(outputs_aux3_soft[args.labeled_bs:]), preds[args.labeled_bs:]), dim=1, keepdim=True)
+                torch.log(outputs_aux3_soft_clamped), preds_unlabeled), dim=1, keepdim=True)
+            variance_aux3 = torch.clamp(variance_aux3, max=10.0)
             exp_variance_aux3 = torch.exp(-variance_aux3)
 
             consistency_weight = get_current_consistency_weight(iter_num//150)
             consistency_dist_main = (
-                preds[args.labeled_bs:] - outputs_soft[args.labeled_bs:]) ** 2
+                preds_unlabeled - outputs_soft_clamped) ** 2
             consistency_loss_main = torch.mean(
                 consistency_dist_main * exp_variance_main) / (torch.mean(exp_variance_main) + 1e-8) + torch.mean(variance_main)
 
             consistency_dist_aux1 = (
-                preds[args.labeled_bs:] - outputs_aux1_soft[args.labeled_bs:]) ** 2
+                preds_unlabeled - outputs_aux1_soft_clamped) ** 2
             consistency_loss_aux1 = torch.mean(
                 consistency_dist_aux1 * exp_variance_aux1) / (torch.mean(exp_variance_aux1) + 1e-8) + torch.mean(variance_aux1)
 
             consistency_dist_aux2 = (
-                preds[args.labeled_bs:] - outputs_aux2_soft[args.labeled_bs:]) ** 2
+                preds_unlabeled - outputs_aux2_soft_clamped) ** 2
             consistency_loss_aux2 = torch.mean(
                 consistency_dist_aux2 * exp_variance_aux2) / (torch.mean(exp_variance_aux2) + 1e-8) + torch.mean(variance_aux2)
 
             consistency_dist_aux3 = (
-                preds[args.labeled_bs:] - outputs_aux3_soft[args.labeled_bs:]) ** 2
+                preds_unlabeled - outputs_aux3_soft_clamped) ** 2
             consistency_loss_aux3 = torch.mean(
                 consistency_dist_aux3 * exp_variance_aux3) / (torch.mean(exp_variance_aux3) + 1e-8) + torch.mean(variance_aux3)
 
