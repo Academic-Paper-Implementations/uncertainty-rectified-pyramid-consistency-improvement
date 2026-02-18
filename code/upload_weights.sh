@@ -22,10 +22,11 @@ EXP_TARGET=${2:-"all"}
 MODEL_BASE_DIR="../model/ACDC"
 
 # ============ ĐỌC CREDENTIALS TỪ .env ============
-ENV_FILE="$(dirname "$0")/../.env"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/../.env"
 if [ -f "$ENV_FILE" ]; then
     export $(grep -v '^#' "$ENV_FILE" | grep -v '^$' | xargs)
-    echo "Loaded credentials from .env"
+    echo "Loaded credentials from $ENV_FILE"
 else
     echo "ERROR: .env file not found at $ENV_FILE"
     echo "Run: cp .env.example .env  then fill in your credentials"

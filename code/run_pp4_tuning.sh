@@ -8,12 +8,13 @@
 cd /teamspace/studios/this_studio/code
 
 # ============ ĐỌC CREDENTIALS TỪ .env ============
-ENV_FILE="$(dirname "$0")/../.env"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/../.env"
 if [ -f "$ENV_FILE" ]; then
     export $(grep -v '^#' "$ENV_FILE" | grep -v '^$' | xargs)
-    echo "Loaded credentials from .env"
+    echo "Loaded credentials from $ENV_FILE"
 else
-    echo "WARNING: .env not found. Upload sẽ bị tắt."
+    echo "WARNING: .env not found at $ENV_FILE. Upload sẽ bị tắt."
     UPLOAD_ENABLED=false
 fi
 # ==================================================
