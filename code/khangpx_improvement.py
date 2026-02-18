@@ -181,8 +181,11 @@ def compute_boundary_weight_map(labels, num_classes, sigma=5.0):
     sdm_abs = torch.abs(sdm)  # (B, C, H, W)
     min_sdm_abs, _ = torch.min(sdm_abs, dim=1)  # (B, H, W)
     
+    # Clip để tránh exp() với giá trị quá lớn gây underflow/NaN
+    # sigma*3 là đủ xa boundary, weight ≈ exp(-4.5) ≈ 0.01
+    min_sdm_abs = torch.clamp(min_sdm_abs, max=sigma * 3)
+    
     # Weight map: gần boundary -> weight cao
-    # Gaussian-like decay từ boundary
     boundary_weight = torch.exp(-min_sdm_abs ** 2 / (2 * sigma ** 2))
     
     # Final weight = 1 + boundary_weight (range: 1 to 2)
@@ -224,7 +227,12 @@ class BoundaryAwareCELoss(nn.Module):
         
         # Apply weight và tính mean
         weighted_ce = ce_per_pixel * weight_map
-        loss = weighted_ce.mean()
+        
+        # NaN guard: nếu có NaN thì fallback về CE thường
+        if torch.isnan(weighted_ce).any() or torch.isinf(weighted_ce).any():
+            loss = ce_per_pixel.mean()
+        else:
+            loss = weighted_ce.mean()
         
         return loss
 
@@ -259,27 +267,30 @@ class BoundaryAwareDiceLoss(nn.Module):
         labels_one_hot = torch.zeros_like(probs)
         labels_one_hot.scatter_(1, labels.unsqueeze(1).long(), 1)  # (B, C, H, W)
         
-        # Tính SDM-based weight map
+        # Tính SDM-based weight map với clipping để tránh NaN
         sdm = compute_sdm_batch(labels, self.num_classes)  # (B, C, H, W)
         sdm_abs = torch.abs(sdm)
+        sdm_abs = torch.clamp(sdm_abs, max=self.sigma * 3)  # clip trước khi exp
         boundary_weight = torch.exp(-sdm_abs ** 2 / (2 * self.sigma ** 2))
         weight_map = 1.0 + boundary_weight  # (B, C, H, W), range [1, 2]
         
-        # Tính Dice Loss per pixel, sau đó weighted average
-        # intersection và union không nhân weight, chỉ dùng weight khi tính loss
+        # Tính intersection và union
         intersection = (probs * labels_one_hot).sum(dim=(2, 3))  # (B, C)
         union = probs.sum(dim=(2, 3)) + labels_one_hot.sum(dim=(2, 3))  # (B, C)
         
         dice_per_class = (2.0 * intersection + self.smooth) / (union + self.smooth)  # (B, C)
         
-        # Tính weighted dice error per pixel: |prob - label| * weight
+        # Chỉ tính dice loss cho các class CÓ xuất hiện trong batch
+        # Tránh NaN khi class không có pixel nào (union ≈ 0)
+        class_present = (union[:, 1:] > 0.01).float()  # (B, C-1), bỏ background
+        dice_loss_per_class = (1.0 - dice_per_class[:, 1:]) * class_present  # (B, C-1)
+        n_present = class_present.sum().clamp(min=1.0)  # tránh chia 0
+        standard_dice_loss = dice_loss_per_class.sum() / n_present
+        
+        # Weighted boundary error
         dice_error = torch.abs(probs - labels_one_hot)  # (B, C, H, W)
         weighted_error = (dice_error * weight_map).mean()  # scalar
         
-        # Kết hợp: standard dice loss + weighted boundary error
-        standard_dice_loss = 1.0 - dice_per_class[:, 1:].mean()
-        
-        # Final loss: đảm bảo luôn >= 0
         dice_loss = standard_dice_loss + 0.5 * weighted_error
         
         return dice_loss
