@@ -25,7 +25,14 @@ MODEL_BASE_DIR="../model/ACDC"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/../.env"
 if [ -f "$ENV_FILE" ]; then
-    export $(grep -v '^#' "$ENV_FILE" | grep -v '^$' | xargs)
+    while IFS='=' read -r key value; do
+        [[ "$key" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "$key" ]] && continue
+        value="${value%%#*}"
+        key="${key// /}"
+        value="${value%"${value##*[![:space:]]}"}"
+        [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && export "$key=$value"
+    done < "$ENV_FILE"
     echo "Loaded credentials from $ENV_FILE"
 else
     echo "ERROR: .env file not found at $ENV_FILE"

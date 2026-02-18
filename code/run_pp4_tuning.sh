@@ -5,13 +5,28 @@
 # Author: KhangPX
 # ================================================================
 
-cd /teamspace/studios/this_studio/code
+# Tính absolute path của script trước khi cd
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# cd vào thư mục code (cùng cấp với script)
+cd "$SCRIPT_DIR"
 
 # ============ ĐỌC CREDENTIALS TỪ .env ============
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/../.env"
 if [ -f "$ENV_FILE" ]; then
-    export $(grep -v '^#' "$ENV_FILE" | grep -v '^$' | xargs)
+    # Parse từng dòng, bỏ qua comment và dòng trống
+    while IFS='=' read -r key value; do
+        # Bỏ qua dòng comment và dòng trống
+        [[ "$key" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "$key" ]] && continue
+        # Bỏ inline comment (phần sau dấu #)
+        value="${value%%#*}"
+        # Trim whitespace
+        key="${key// /}"
+        value="${value%"${value##*[![:space:]]}"}"
+        # Export nếu key hợp lệ
+        [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && export "$key=$value"
+    done < "$ENV_FILE"
     echo "Loaded credentials from $ENV_FILE"
 else
     echo "WARNING: .env not found at $ENV_FILE. Upload sẽ bị tắt."
