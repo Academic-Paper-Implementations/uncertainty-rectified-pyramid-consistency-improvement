@@ -1,14 +1,13 @@
 """
-URPC with Boundary-Aware Loss + Dynamic Confidence Thresholding (PP4 + PP3)
-============================================================================
+URPC with Boundary-Aware Loss - PP4 Hyperparameter Tuning
+=========================================================
 Author: KhangPX
 Based on: train_uncertainty_rectified_pyramid_consistency_2D.py
 
 Improvements:
   - PP4: Tích hợp Signed Distance Map (SDM) để tạo Boundary-Aware Loss,
          phạt nặng các pixel dự đoán sai ở gần ranh giới đối tượng.
-  - PP3: Dynamic Confidence Thresholding - chỉ sử dụng pseudo-labels
-         có confidence cao cho consistency loss, threshold tăng dần theo epoch.
+         Tune: boundary_weight, sdm_sigma, boundary_mode.
 """
 
 import argparse
@@ -44,7 +43,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str,
                     default='../data/ACDC/ACDC', help='Name of Experiment')
 parser.add_argument('--exp', type=str,
-                    default='ACDC/URPC_BoundaryAware_ConfThreshold', help='experiment_name')
+                    default='ACDC/URPC_BoundaryAware_PP4', help='experiment_name')
 parser.add_argument('--model', type=str,
                     default='unet_urpc', help='model_name')
 parser.add_argument('--max_iterations', type=int,
@@ -77,15 +76,12 @@ parser.add_argument('--boundary_weight', type=float, default=1.0,
                     help='weight for boundary-aware loss')
 parser.add_argument('--sdm_sigma', type=float, default=5.0,
                     help='sigma for SDM weight normalization (controls boundary width)')
-
-# ============ CONFIDENCE THRESHOLDING PARAMETERS (PP3 - NEW) ============
-parser.add_argument('--conf_thresh_start', type=float, default=0.7,
-                    help='initial confidence threshold for pseudo-labels')
-parser.add_argument('--conf_thresh_end', type=float, default=0.95,
-                    help='final confidence threshold for pseudo-labels')
-parser.add_argument('--conf_thresh_rampup', type=float, default=10000.0,
-                    help='iterations to ramp up confidence threshold')
-# ========================================================================
+parser.add_argument('--boundary_mode', type=str, default='both',
+                    choices=['ce_only', 'dice_only', 'both'],
+                    help='which losses to apply boundary weighting to')
+parser.add_argument('--boundary_max_weight', type=float, default=2.0,
+                    help='max weight at boundary (1 + this value at boundary center)')
+# ======================================================================
 
 args = parser.parse_args()
 
@@ -288,37 +284,6 @@ class BoundaryAwareDiceLoss(nn.Module):
 # ==================================================================
 
 
-# ============ DYNAMIC CONFIDENCE THRESHOLDING (PP3 - NEW) ============
-
-def get_current_confidence_threshold(iter_num, start_thresh, end_thresh, rampup_length):
-    """
-    Tính confidence threshold hiện tại theo curriculum learning.
-    
-    Threshold tăng dần từ start_thresh đến end_thresh theo sigmoid ramp-up.
-    Ở giai đoạn đầu (threshold thấp), cho phép nhiều pseudo-labels.
-    Ở giai đoạn sau (threshold cao), chỉ chọn pseudo-labels có confidence cao.
-    
-    Args:
-        iter_num: iteration hiện tại
-        start_thresh: threshold ban đầu (e.g., 0.7)
-        end_thresh: threshold cuối cùng (e.g., 0.95)
-        rampup_length: số iterations để ramp up
-        
-    Returns:
-        current_threshold: float, threshold hiện tại
-    """
-    if iter_num >= rampup_length:
-        return end_thresh
-    
-    # Sigmoid ramp-up
-    rampup_value = ramps.sigmoid_rampup(iter_num, rampup_length)
-    current_threshold = start_thresh + (end_thresh - start_thresh) * rampup_value
-    
-    return current_threshold
-
-# ======================================================================
-
-
 def patients_to_slices(dataset, patiens_num):
     ref_dict = None
     if "ACDC" in dataset:
@@ -391,10 +356,8 @@ def train(args, snapshot_path):
 
     writer = SummaryWriter(snapshot_path + '/log')
     logging.info("{} iterations per epoch".format(len(trainloader)))
-    logging.info("Boundary-Aware Loss enabled with weight={}, sigma={}".format(
-        args.boundary_weight, args.sdm_sigma))
-    logging.info("Dynamic Confidence Thresholding enabled: {:.2f} -> {:.2f} over {} iters".format(
-        args.conf_thresh_start, args.conf_thresh_end, args.conf_thresh_rampup))
+    logging.info("Boundary-Aware Loss enabled: weight={}, sigma={}, mode={}, max_weight={}".format(
+        args.boundary_weight, args.sdm_sigma, args.boundary_mode, args.boundary_max_weight))
 
     iter_num = 0
     max_epoch = max_iterations // len(trainloader) + 1
@@ -436,8 +399,7 @@ def train(args, snapshot_path):
             supervised_loss = (loss_ce+loss_ce_aux1+loss_ce_aux2+loss_ce_aux3 +
                                loss_dice+loss_dice_aux1+loss_dice_aux2+loss_dice_aux3)/8
             
-            # ============ BOUNDARY-AWARE LOSS (CẢI TIẾN MỚI) ============
-            # Tính Boundary-Aware Loss cho main output
+            # ============ BOUNDARY-AWARE LOSS (PP4 - TUNABLE) ============
             loss_boundary_ce = boundary_ce_loss(
                 outputs[:args.labeled_bs], 
                 label_batch[:args.labeled_bs]
@@ -447,23 +409,18 @@ def train(args, snapshot_path):
                 label_batch[:args.labeled_bs]
             )
             
-            # Tổng hợp Boundary-Aware Loss với weight
-            loss_boundary = args.boundary_weight * (loss_boundary_ce + loss_boundary_dice)
+            # boundary_mode: chọn loss nào áp dụng boundary weighting
+            if args.boundary_mode == 'ce_only':
+                loss_boundary = args.boundary_weight * loss_boundary_ce
+            elif args.boundary_mode == 'dice_only':
+                loss_boundary = args.boundary_weight * loss_boundary_dice
+            else:  # 'both'
+                loss_boundary = args.boundary_weight * (loss_boundary_ce + loss_boundary_dice)
             # ============================================================
 
-            # ============ CONSISTENCY LOSS (CÓ CONFIDENCE THRESHOLDING - PP3) ============
-            # Naive averaging (giữ nguyên từ baseline)
+            # ============ CONSISTENCY LOSS (BASELINE - KHÔNG THAY ĐỔI) ============
             preds = (outputs_soft + outputs_aux1_soft +
                      outputs_aux2_soft + outputs_aux3_soft) / 4
-            
-            # PP3: Dynamic confidence thresholding
-            current_threshold = get_current_confidence_threshold(
-                iter_num, args.conf_thresh_start, args.conf_thresh_end, args.conf_thresh_rampup
-            )
-            
-            # Tạo confidence mask: chỉ giữ pixels có max probability > threshold
-            max_probs, _ = torch.max(preds[args.labeled_bs:], dim=1)  # (B_unlabeled, H, W)
-            confidence_mask = (max_probs > current_threshold).float().unsqueeze(1)  # (B_unlabeled, 1, H, W)
 
             variance_main = torch.sum(kl_distance(
                 torch.log(outputs_soft[args.labeled_bs:]), preds[args.labeled_bs:]), dim=1, keepdim=True)
@@ -484,29 +441,23 @@ def train(args, snapshot_path):
             consistency_weight = get_current_consistency_weight(iter_num//150)
             consistency_dist_main = (
                 preds[args.labeled_bs:] - outputs_soft[args.labeled_bs:]) ** 2
-
-            # Apply confidence mask to consistency loss
             consistency_loss_main = torch.mean(
-                consistency_dist_main * exp_variance_main * confidence_mask
-            ) / (torch.mean(exp_variance_main * confidence_mask) + 1e-8) + torch.mean(variance_main * confidence_mask)
+                consistency_dist_main * exp_variance_main) / (torch.mean(exp_variance_main) + 1e-8) + torch.mean(variance_main)
 
             consistency_dist_aux1 = (
                 preds[args.labeled_bs:] - outputs_aux1_soft[args.labeled_bs:]) ** 2
             consistency_loss_aux1 = torch.mean(
-                consistency_dist_aux1 * exp_variance_aux1 * confidence_mask
-            ) / (torch.mean(exp_variance_aux1 * confidence_mask) + 1e-8) + torch.mean(variance_aux1 * confidence_mask)
+                consistency_dist_aux1 * exp_variance_aux1) / (torch.mean(exp_variance_aux1) + 1e-8) + torch.mean(variance_aux1)
 
             consistency_dist_aux2 = (
                 preds[args.labeled_bs:] - outputs_aux2_soft[args.labeled_bs:]) ** 2
             consistency_loss_aux2 = torch.mean(
-                consistency_dist_aux2 * exp_variance_aux2 * confidence_mask
-            ) / (torch.mean(exp_variance_aux2 * confidence_mask) + 1e-8) + torch.mean(variance_aux2 * confidence_mask)
+                consistency_dist_aux2 * exp_variance_aux2) / (torch.mean(exp_variance_aux2) + 1e-8) + torch.mean(variance_aux2)
 
             consistency_dist_aux3 = (
                 preds[args.labeled_bs:] - outputs_aux3_soft[args.labeled_bs:]) ** 2
             consistency_loss_aux3 = torch.mean(
-                consistency_dist_aux3 * exp_variance_aux3 * confidence_mask
-            ) / (torch.mean(exp_variance_aux3 * confidence_mask) + 1e-8) + torch.mean(variance_aux3 * confidence_mask)
+                consistency_dist_aux3 * exp_variance_aux3) / (torch.mean(exp_variance_aux3) + 1e-8) + torch.mean(variance_aux3)
 
             consistency_loss = (consistency_loss_main + consistency_loss_aux1 +
                                 consistency_loss_aux2 + consistency_loss_aux3) / 4
@@ -539,15 +490,11 @@ def train(args, snapshot_path):
             writer.add_scalar('info/boundary_loss', loss_boundary, iter_num)
             writer.add_scalar('info/boundary_ce_loss', loss_boundary_ce, iter_num)
             writer.add_scalar('info/boundary_dice_loss', loss_boundary_dice, iter_num)
-            # Log Confidence Threshold (PP3 - NEW)
-            writer.add_scalar('info/conf_threshold', current_threshold, iter_num)
-            writer.add_scalar('info/conf_mask_ratio', confidence_mask.mean().item(), iter_num)
             # ======================================================
             
             logging.info(
-                'iteration %d : loss : %f, loss_ce: %f, loss_dice: %f, boundary: %f, conf_th: %.3f (%.1f%%)' %
-                (iter_num, loss.item(), loss_ce.item(), loss_dice.item(), loss_boundary.item(),
-                 current_threshold, confidence_mask.mean().item() * 100))
+                'iteration %d : loss : %f, loss_ce: %f, loss_dice: %f, boundary: %f' %
+                (iter_num, loss.item(), loss_ce.item(), loss_dice.item(), loss_boundary.item()))
 
             if iter_num % 20 == 0:
                 image = volume_batch[1, 0:1, :, :]
@@ -635,8 +582,7 @@ if __name__ == "__main__":
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
     logging.info("=" * 60)
-    logging.info("URPC with Boundary-Aware Loss + Dynamic Confidence Thresholding")
-    logging.info("PP4 (SDM Integration) + PP3 (Confidence Thresholding)")
+    logging.info("URPC with Boundary-Aware Loss (PP4) - Hyperparameter Tuning")
     logging.info("Author: KhangPX")
     logging.info("=" * 60)
     train(args, snapshot_path)
