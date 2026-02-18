@@ -31,7 +31,7 @@ fi
 UPLOAD_ENABLED=${UPLOAD_ENABLED:-false}
 MODEL_BASE_DIR="$SCRIPT_DIR/../model"
 
-# ============ UPLOAD LÊN AZURE ============
+# ============ UPLOAD LÊN AZURE (curl + SAS token, không cần az CLI) ============
 upload_weights() {
     local EXP_NAME=$1
     local WEIGHT_DIR="$MODEL_BASE_DIR/ACDC/${EXP_NAME}_7_labeled/unet_urpc"
@@ -45,18 +45,44 @@ upload_weights() {
         return
     fi
 
-    echo "Uploading $EXP_NAME to Azure..."
-    az storage blob upload-batch \
-        --connection-string "$AZURE_CONNECTION_STRING" \
-        --destination "$AZURE_CONTAINER" \
-        --source "$WEIGHT_DIR" \
-        --destination-path "$EXP_NAME" \
-        --pattern "*.pth" \
-        --overwrite true
+    # Lấy AccountName từ connection string
+    local ACCT=$(echo "$AZURE_CONNECTION_STRING" | grep -oP 'AccountName=\K[^;]+')
+    local CONTAINER="${AZURE_CONTAINER:-ssl4mis-weights}"
+    local SAS="${AZURE_SAS_TOKEN}"
 
-    [ $? -eq 0 ] && echo "SUCCESS: $EXP_NAME → Azure" || echo "ERROR: Upload failed"
+    if [ -z "$ACCT" ] || [ -z "$SAS" ]; then
+        echo "ERROR: Cần AZURE_CONNECTION_STRING và AZURE_SAS_TOKEN trong .env"
+        echo "  Tạo SAS token: Azure Portal → Storage Account → Shared access signature"
+        return
+    fi
+
+    local UPLOAD_OK=0
+    local UPLOAD_FAIL=0
+
+    echo "Uploading $EXP_NAME → Azure ($ACCT/$CONTAINER)..."
+    for pth_file in "$WEIGHT_DIR"/*.pth; do
+        [ -f "$pth_file" ] || continue
+        local FNAME=$(basename "$pth_file")
+        local URL="https://${ACCT}.blob.core.windows.net/${CONTAINER}/${EXP_NAME}/${FNAME}?${SAS}"
+
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT \
+            -H "x-ms-blob-type: BlockBlob" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary "@$pth_file" \
+            "$URL")
+
+        if [ "$HTTP_CODE" = "201" ]; then
+            echo "  ✓ $FNAME"
+            UPLOAD_OK=$((UPLOAD_OK+1))
+        else
+            echo "  ✗ $FNAME [HTTP $HTTP_CODE]"
+            UPLOAD_FAIL=$((UPLOAD_FAIL+1))
+        fi
+    done
+
+    echo "Upload done: $UPLOAD_OK OK, $UPLOAD_FAIL FAIL"
 }
-# ==========================================
+# =============================================================================
 
 run_experiment() {
     local EXP_NAME=$1
