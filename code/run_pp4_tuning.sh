@@ -11,12 +11,19 @@ cd "$SCRIPT_DIR"
 # ============ ĐỌC CREDENTIALS TỪ .env ============
 ENV_FILE="$SCRIPT_DIR/../.env"
 if [ -f "$ENV_FILE" ]; then
-    while IFS='=' read -r key value; do
-        [[ "$key" =~ ^[[:space:]]*# ]] && continue
-        [[ -z "$key" ]] && continue
-        value="${value%%#*}"
+    while IFS= read -r line; do
+        # Bỏ qua comment và dòng trống
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line// }" ]] && continue
+        # Split tại dấu = ĐẦU TIÊN, giữ nguyên phần còn lại (kể cả = trong value)
+        key="${line%%=*}"
+        value="${line#*=}"
+        # Trim key
         key="${key// /}"
+        # Bỏ inline comment CUỐI dòng (chỉ nếu không phải connection string)
+        # Chỉ trim whitespace trailing
         value="${value%"${value##*[![:space:]]}"}"
+        # Export nếu key hợp lệ
         [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && export "$key=$value"
     done < "$ENV_FILE"
     echo "Loaded credentials from $ENV_FILE"
