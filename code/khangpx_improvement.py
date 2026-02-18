@@ -83,7 +83,7 @@ parser.add_argument('--boundary_max_weight', type=float, default=2.0,
                     help='max weight at boundary (1 + this value at boundary center)')
 # ======================================================================
 
-args = parser.parse_args()
+args, _ = parser.parse_known_args()  # parse_known_args bỏ qua args lạ từ net_factory
 
 # Version marker - nếu thấy dòng này là đúng file PP4
 print(f"[PP4-KhangPX] Running from: {__file__}", flush=True)
