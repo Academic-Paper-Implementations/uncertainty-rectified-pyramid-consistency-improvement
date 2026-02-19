@@ -172,9 +172,9 @@ for EXP in "${EXPERIMENTS[@]}"; do
             MY_D=${NUM_ARR[3]}; MY_H=${NUM_ARR[4]}; MY_A=${NUM_ARR[5]}
             LV_D=${NUM_ARR[6]}; LV_H=${NUM_ARR[7]}; LV_A=${NUM_ARR[8]}
 
-            MEAN_D=$(echo "scale=6; ($RV_D + $MY_D + $LV_D) / 3" | bc)
-            MEAN_H=$(echo "scale=6; ($RV_H + $MY_H + $LV_H) / 3" | bc)
-            MEAN_A=$(echo "scale=6; ($RV_A + $MY_A + $LV_A) / 3" | bc)
+            MEAN_D=$(python3 -c "print(round(($RV_D + $MY_D + $LV_D) / 3, 6))")
+            MEAN_H=$(python3 -c "print(round(($RV_H + $MY_H + $LV_H) / 3, 6))")
+            MEAN_A=$(python3 -c "print(round(($RV_A + $MY_A + $LV_A) / 3, 6))")
 
             echo "$EXP,$RV_D,$RV_H,$RV_A,$MY_D,$MY_H,$MY_A,$LV_D,$LV_H,$LV_A,$MEAN_D,$MEAN_H,$MEAN_A" >> "$RESULT_CSV"
             echo "  → mean_dice=$MEAN_D  mean_hd95=$MEAN_H  mean_asd=$MEAN_A"
