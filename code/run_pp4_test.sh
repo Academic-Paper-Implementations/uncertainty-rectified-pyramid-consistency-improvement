@@ -159,12 +159,11 @@ for EXP in "${EXPERIMENTS[@]}"; do
     echo "$TEST_OUT"
 
     # Step 3: Parse kết quả từ output
-    # Output cuối của script là array: [[dice, hd95, asd], [dice, hd95, asd], [dice, hd95, asd]]
-    # Dòng metric format: [[d1, h1, a1], [d2, h2, a2], [d3, h3, a3]]
-    METRICS=$(echo "$TEST_OUT" | grep -E "^\[\[" | tail -1)
+    # Output format: [array([dice, hd95, asd]), array([...]), array([...])]
+    METRICS=$(echo "$TEST_OUT" | grep -E "^\[array" | tail -1)
 
     if [ -n "$METRICS" ]; then
-        # Parse 9 số từ metrics array
+        # Parse 9 số từ metrics array: [array([d,h,a]), array([d,h,a]), array([d,h,a])]
         NUMS=$(echo "$METRICS" | grep -oP '[0-9]+\.[0-9]+' | head -9)
         NUM_ARR=($NUMS)
 
@@ -197,8 +196,15 @@ echo "================================================================"
 echo "KẾT QUẢ CUỐI CÙNG"
 echo "================================================================"
 echo ""
-# In bảng đẹp từ CSV (dùng column)
-column -t -s',' "$RESULT_CSV"
+# In bảng đẹp từ CSV dùng python (thay vì column không có sẵn)
+python3 -c "
+import csv, sys
+rows = list(csv.reader(open('$RESULT_CSV')))
+if not rows: sys.exit()
+widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+for row in rows:
+    print('  ' + '  '.join(cell.ljust(widths[i]) for i, cell in enumerate(row)))
+"
 
 # ================================================================
 # UPLOAD KẾT QUẢ LÊN AZURE
