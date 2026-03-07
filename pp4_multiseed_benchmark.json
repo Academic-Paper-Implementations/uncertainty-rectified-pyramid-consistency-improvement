@@ -1,0 +1,150 @@
+{
+  "description": "PP4 Multi-Seed Benchmark (URPC + Boundary-Aware Loss)",
+  "timestamp": "20260307_163604",
+  "config": {
+    "model": "unet_urpc",
+    "num_classes": 4,
+    "labeled_num": 7,
+    "experiments": [
+      "PP4_SEED1337_w1.5_s3.0",
+      "PP4_SEED12345_w1.5_s3.0",
+      "PP4_SEED2024_w1.5_s3.0",
+      "PP4_SEED42_w1.5_s3.0"
+    ]
+  },
+  "per_run": [
+    {
+      "RV_Dice": 0.860366,
+      "RV_HD95": 2.772139,
+      "RV_ASD": 0.921037,
+      "Myo_Dice": 0.846497,
+      "Myo_HD95": 4.19179,
+      "Myo_ASD": 1.728389,
+      "LV_Dice": 0.902459,
+      "LV_HD95": 11.364204,
+      "LV_ASD": 2.757693,
+      "mean_Dice": 0.869774,
+      "mean_HD95": 6.109378,
+      "mean_ASD": 1.802373,
+      "experiment": "PP4_SEED1337_w1.5_s3.0",
+      "seed": 1337
+    },
+    {
+      "RV_Dice": 0.815709,
+      "RV_HD95": 13.978415,
+      "RV_ASD": 3.918953,
+      "Myo_Dice": 0.837068,
+      "Myo_HD95": 7.149791,
+      "Myo_ASD": 2.167381,
+      "LV_Dice": 0.881952,
+      "LV_HD95": 14.211001,
+      "LV_ASD": 4.043023,
+      "mean_Dice": 0.84491,
+      "mean_HD95": 11.779736,
+      "mean_ASD": 3.376452,
+      "experiment": "PP4_SEED12345_w1.5_s3.0",
+      "seed": 12345
+    },
+    {
+      "RV_Dice": 0.845391,
+      "RV_HD95": 4.768536,
+      "RV_ASD": 1.427961,
+      "Myo_Dice": 0.842313,
+      "Myo_HD95": 3.550659,
+      "Myo_ASD": 1.632819,
+      "LV_Dice": 0.903687,
+      "LV_HD95": 9.105782,
+      "LV_ASD": 2.438321,
+      "mean_Dice": 0.863797,
+      "mean_HD95": 5.808326,
+      "mean_ASD": 1.833034,
+      "experiment": "PP4_SEED2024_w1.5_s3.0",
+      "seed": 2024
+    },
+    {
+      "RV_Dice": 0.835897,
+      "RV_HD95": 4.335277,
+      "RV_ASD": 1.565825,
+      "Myo_Dice": 0.836924,
+      "Myo_HD95": 4.278874,
+      "Myo_ASD": 1.348746,
+      "LV_Dice": 0.893563,
+      "LV_HD95": 8.795637,
+      "LV_ASD": 2.018265,
+      "mean_Dice": 0.855462,
+      "mean_HD95": 5.803263,
+      "mean_ASD": 1.644279,
+      "experiment": "PP4_SEED42_w1.5_s3.0",
+      "seed": 42
+    }
+  ],
+  "benchmark": {
+    "RV_Dice": {
+      "mean": 0.839341,
+      "std": 0.018699,
+      "formatted": "0.8393 ± 0.0187"
+    },
+    "RV_HD95": {
+      "mean": 6.463592,
+      "std": 5.082727,
+      "formatted": "6.4636 ± 5.0827"
+    },
+    "RV_ASD": {
+      "mean": 1.958444,
+      "std": 1.336085,
+      "formatted": "1.9584 ± 1.3361"
+    },
+    "Myo_Dice": {
+      "mean": 0.8407,
+      "std": 0.004606,
+      "formatted": "0.8407 ± 0.0046"
+    },
+    "Myo_HD95": {
+      "mean": 4.792778,
+      "std": 1.604541,
+      "formatted": "4.7928 ± 1.6045"
+    },
+    "Myo_ASD": {
+      "mean": 1.719334,
+      "std": 0.339435,
+      "formatted": "1.7193 ± 0.3394"
+    },
+    "LV_Dice": {
+      "mean": 0.895415,
+      "std": 0.010045,
+      "formatted": "0.8954 ± 0.0100"
+    },
+    "LV_HD95": {
+      "mean": 10.869156,
+      "std": 2.504793,
+      "formatted": "10.8692 ± 2.5048"
+    },
+    "LV_ASD": {
+      "mean": 2.814326,
+      "std": 0.873307,
+      "formatted": "2.8143 ± 0.8733"
+    },
+    "mean_Dice": {
+      "mean": 0.858486,
+      "std": 0.010787,
+      "formatted": "0.8585 ± 0.0108"
+    },
+    "mean_HD95": {
+      "mean": 7.375175,
+      "std": 2.93986,
+      "formatted": "7.3752 ± 2.9399"
+    },
+    "mean_ASD": {
+      "mean": 2.164034,
+      "std": 0.812499,
+      "formatted": "2.1640 ± 0.8125"
+    }
+  },
+  "best_run": {
+    "run_name": "PP4_SEED1337_w1.5_s3.0",
+    "seed": 1337,
+    "mean_Dice": 0.8697737966666667,
+    "mean_HD95": 6.109377556666666,
+    "mean_ASD": 1.8023731733333335
+  }
+}
