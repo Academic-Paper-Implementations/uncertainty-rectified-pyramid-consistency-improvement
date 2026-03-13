@@ -1,0 +1,170 @@
+% ================================================================
+%  Section 3: Methodology — Final Report
+%  URPC with Signed Distance Map Boundary Loss
+%  for Semi-Supervised Medical Image Segmentation
+% ================================================================
+% Cần thêm vào preamble:
+%   \usepackage{amsmath,amssymb}
+%   \usepackage{graphicx}
+%   \usepackage{booktabs}
+%   \usepackage{bm}
+% ================================================================
+
+\section{The Proposed Method}
+
+We build upon the Uncertainty Rectified Pyramid Consistency (URPC) framework~\cite{media2022urpc} and extend it with a \emph{Boundary-Aware Loss} driven by Signed Distance Maps (SDMs). Fig.~\ref{fig:framework} illustrates the overall pipeline: a pyramid prediction network produces multi-scale segmentation maps from both labeled and unlabeled data; an uncertainty-rectified consistency loss regularises the unlabeled predictions; and our proposed SDM-based boundary loss strengthens supervision near object contours on the labeled data. Below, we first review the baseline URPC components (Sections~\ref{sec:pyramid}--\ref{sec:urpc-loss}) and then present our boundary-aware extension (Section~\ref{sec:sdm}).
+
+% ---------- FIGURE: Overall Framework ----------
+\begin{figure}[t]
+    \centering
+    % === PLACEHOLDER: Thay bằng hình pipeline thực tế ===
+    \fbox{\parbox{0.95\textwidth}{\centering\vspace{3cm}
+        \textbf{[Figure placeholder --- Overall framework]}\\[6pt]
+        \small
+        Left: UNet encoder--decoder with 4 auxiliary heads (dropout perturbations).\\
+        Middle: Multi-scale predictions $p_1,\ldots,p_4$ $\to$ uncertainty maps $\mathcal{D}_s$.\\
+        Right: Loss diagram showing $\mathcal{L}_\text{sup}$, $\mathcal{L}_\text{unsup}$, $\mathcal{L}_\text{boundary}$.\\
+        SDM weight-map overlay on a sample ACDC slice.
+    \vspace{1cm}}}
+    \caption{Overview of the proposed framework. The pyramid prediction network generates multi-scale outputs $p_1,\ldots,p_4$ with dropout-based perturbations. For labeled data, a standard supervised loss and our SDM boundary-aware loss are applied. For unlabeled data, an uncertainty-rectified pyramid consistency loss is used. The total loss combines all three terms with a time-dependent weighting schedule.}
+    \label{fig:framework}
+\end{figure}
+% ---- Hướng dẫn tạo hình:
+%   Dùng draw.io hoặc PowerPoint:
+%   (1) Vẽ UNet encoder (5 blocks) + decoder (4 blocks) + skip connections
+%   (2) 4 auxiliary heads tại resolution 1/8, 1/4, 1/2, 1/1
+%   (3) Mũi tên từ outputs → "Average" → p_avg
+%   (4) Nhánh trên: supervised loss + boundary loss (với SDM icon)
+%   (5) Nhánh dưới: consistency loss + uncertainty rectification
+%   (6) Export PNG 300dpi, đặt tại figures/framework.png
+% -------------------------------------------------
+
+
+\subsection{Pyramid Prediction Network}
+\label{sec:pyramid}
+
+Let the training set $D_{N+M} = D^l_N \cup D^u_M$ consist of $N$ labeled and $M$ unlabeled images. For a labeled image $x_i \in D^l_N$ the ground truth $y_i$ is available; for $x_i \in D^u_M$ it is not. The segmentation model $f_\phi(\cdot)$ is a UNet-based encoder--decoder whose decoder is extended with $S{=}4$ auxiliary segmentation heads at different resolution levels ($1/8$, $1/4$, $1/2$, and full resolution). To encourage prediction diversity, each auxiliary head is preceded by a distinct perturbation layer (standard dropout, channel dropout, and uniform feature noise, respectively). Given an input $x$, the network produces multi-scale predictions $[p'_1, \ldots, p'_S]$. After bilinear up-sampling to the input resolution these become $[p_1, \ldots, p_S]$. During inference only the full-resolution head $p_1$ is used.
+
+For the \textbf{labeled data}, the supervised loss averages cross-entropy and Dice loss across all $S$ heads:
+\begin{equation}
+    \mathcal{L}_\text{sup} = \frac{1}{2S}\sum_{s=1}^{S}\bigl(\text{CE}(p_s, y) + \text{Dice}(p_s, y)\bigr).
+    \label{eq:sup}
+\end{equation}
+
+
+\subsection{Uncertainty Rectified Pyramid Consistency}
+\label{sec:urpc}
+
+For the \textbf{unlabeled data}, the framework exploits the multi-scale predictions via a consistency loss. The ensemble (average) prediction serves as a soft pseudo-label:
+\begin{equation}
+    \bar{p} = \frac{1}{S}\sum_{s=1}^{S} p_s.
+    \label{eq:avg}
+\end{equation}
+
+Directly enforcing pixel-level consistency across scales is problematic because each scale captures different spatial frequencies. To address this, URPC introduces an uncertainty map per scale based on KL-divergence:
+\begin{equation}
+    \mathcal{D}_s^i = \sum_{j=0}^{C-1} p_s^{i,j} \cdot \log \frac{p_s^{i,j}}{\bar{p}^{i,j}},
+    \label{eq:uncertainty}
+\end{equation}
+where $i$ indexes a pixel and $j$ indexes one of $C$ classes. A larger $\mathcal{D}_s^i$ indicates that pixel $i$ at scale $s$ deviates substantially from the consensus, i.e., it is uncertain. This uncertainty is then used to down-weight unreliable pixels in the consistency loss:
+\begin{equation}
+    \mathcal{L}_\text{unsup}
+    = \frac{1}{S}\sum_{s=1}^{S}
+      \left[
+        \frac{\sum_i \|p_s^i - \bar{p}^i\|^2 \cdot e^{-\mathcal{D}_s^i}}
+             {\sum_i e^{-\mathcal{D}_s^i}}
+        \;+\; \mathcal{D}_s^i
+      \right],
+    \label{eq:unsup}
+\end{equation}
+where the first term is the rectified consistency loss (reliable pixels contribute more) and the second term encourages overall uncertainty minimization.
+
+
+\subsection{Boundary-Aware Loss via Signed Distance Maps}
+\label{sec:sdm}
+
+The supervised and consistency losses described above treat all spatial locations uniformly, yet segmentation errors in medical images concentrate disproportionately along object boundaries. To address this, we propose a \textbf{Boundary-Aware Loss} that uses Signed Distance Maps (SDMs) to explicitly amplify the penalty near class boundaries on the labeled data.
+
+% ---------- FIGURE: SDM Visualization ----------
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.98\textwidth]{figures/sdm_visualization.png}
+    \caption{Visualization of the SDM-based boundary weighting on an ACDC slice. (a)~Ground-truth labels. (b)~Signed distance map $\phi_c$ for one class. (c)~Resulting weight map $w$: values approach 2 at boundaries and 1 in homogeneous regions.}
+    \label{fig:sdm-vis}
+\end{figure}
+% ---- Hướng dẫn tạo hình:
+%   Dùng Python (matplotlib):
+%     1. Load 1 slice ACDC (e.g., patient001_frame01, slice 5)
+%     2. Compute SDM bằng scipy.ndimage.distance_transform_edt
+%     3. Compute weight map theo Eq. (6)
+%     4. fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+%        axes[0].imshow(label, cmap='tab10')  # Ground truth
+%        axes[1].imshow(sdm, cmap='RdBu_r')   # SDM heatmap
+%        axes[2].imshow(weight_map, cmap='hot') # Weight map
+%     5. Lưu figures/sdm_visualization.png, 300dpi
+% -------------------------------------------------
+
+\subsubsection{SDM Computation.}
+For each class $c$ in the ground-truth label map, we compute a Signed Distance Map $\phi_c$ via the Euclidean distance transform: $\phi_c$ is positive inside the region, negative outside, and approximately zero at the boundary. A per-pixel boundary weight map is then constructed as:
+\begin{equation}
+    w(i,j) = 1 + \exp\!\left(-\frac{\bigl(\min_c |\phi_c(i,j)|\bigr)^2}{2\sigma^2}\right),
+    \label{eq:weight-map}
+\end{equation}
+where $\sigma$ controls the spatial extent of the boundary-emphasised zone.  Intuitively, $w \approx 2$ at boundaries and $w \approx 1$ in homogeneous interior or exterior regions, creating a smooth transition that avoids discontinuous gradients.
+
+\subsubsection{Boundary-Weighted Loss Terms.}
+The weight map $w$ is incorporated into two complementary loss terms, applied \emph{only} on the labeled data and \emph{only} through the main (full-resolution) head $p_1$:
+
+\begin{itemize}
+    \item \textbf{Boundary-CE.} The standard per-pixel cross-entropy is multiplied by the weight map:
+    \begin{equation}
+        \mathcal{L}_\text{b-CE} = -\frac{1}{HW}\sum_{i} w_i \sum_{c} y_i^c \log \hat{p}_i^c,
+        \label{eq:bce}
+    \end{equation}
+    where $y_i^c$ is the one-hot ground truth and $\hat{p}_i^c$ the predicted probability at pixel $i$ for class $c$.
+
+    \item \textbf{Boundary-Dice.} The class-wise Dice loss is augmented with a weighted pixel-level error:
+    \begin{equation}
+        \mathcal{L}_\text{b-Dice} = \text{Dice}(\hat{p}, y) \;+\; \frac{1}{2} \cdot \mathbb{E}\bigl[|\hat{p} - y_\text{oh}| \odot w\bigr],
+        \label{eq:bdice}
+    \end{equation}
+    where $\odot$ denotes the Hadamard product. The first term maintains the standard region-overlap objective while the second term directly penalises prediction errors weighted by boundary proximity.
+\end{itemize}
+
+\noindent The combined boundary-aware loss is:
+\begin{equation}
+    \mathcal{L}_\text{boundary} = \alpha_b \bigl(\mathcal{L}_\text{b-CE} + \mathcal{L}_\text{b-Dice}\bigr),
+    \label{eq:boundary}
+\end{equation}
+where $\alpha_b$ is a scalar controlling the overall strength of boundary supervision.
+
+
+\subsection{Overall Objective Function}
+\label{sec:urpc-loss}
+
+Combining the supervised loss (Eq.~\ref{eq:sup}), the uncertainty-rectified consistency loss (Eq.~\ref{eq:unsup}), and the boundary-aware loss (Eq.~\ref{eq:boundary}), the total training objective is:
+\begin{equation}
+    \mathcal{L}_\text{total} = \mathcal{L}_\text{sup} + \lambda(t)\,\mathcal{L}_\text{unsup} + \mathcal{L}_\text{boundary},
+    \label{eq:total}
+\end{equation}
+where $\lambda(t) = w_\text{max} \cdot e^{-5(1-t/t_\text{max})^2}$ is a time-dependent Gaussian ramp-up function that gradually increases the contribution of the consistency loss from zero to $w_\text{max}$ over the course of training. The boundary-aware loss $\mathcal{L}_\text{boundary}$ is applied from the first iteration with fixed weight $\alpha_b$, since it operates only on the labeled data where ground-truth boundaries are available.
+
+% ---------- FIGURE: Loss Diagram ----------
+% \begin{figure}[t]
+%     \centering
+%     % === OPTIONAL: Loss component diagram ===
+%     \fbox{\parbox{0.95\textwidth}{\centering\vspace{2cm}
+%         \textbf{[Optional figure --- Loss component diagram]}\\[6pt]
+%         \small
+%         Diagram showing how $\mathcal{L}_\text{sup}$, $\lambda(t)\mathcal{L}_\text{unsup}$,
+%         and $\mathcal{L}_\text{boundary}$ are combined.\\
+%         Show the ramp-up curve $\lambda(t)$ as an inset.
+%     \vspace{1cm}}}
+%     \caption{Composition of the total loss. The boundary-aware loss is active from the start, while the consistency loss is gradually ramped up via $\lambda(t)$.}
+%     \label{fig:loss-diagram}
+% \end{figure}
+% ---- Hướng dẫn: Vẽ bằng draw.io hoặc TikZ:
+%   - 3 boxes: L_sup, L_unsup, L_boundary
+%   - Arrows merging into L_total
+%   - Inset: plot λ(t) curve (sigmoid ramp-up)
+% -------------------------------------------------
