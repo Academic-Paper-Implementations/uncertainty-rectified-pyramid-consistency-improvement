@@ -158,15 +158,27 @@ def render_figure(
     label: np.ndarray,
     sdm: np.ndarray,
     weight_map: np.ndarray,
+    class_names,
+    num_classes: int,
     class_id: int,
     save_path: Path,
     dpi: int,
 ):
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
 
-    axes[0].imshow(label, cmap="tab10", interpolation="nearest")
+    label_cmap = plt.get_cmap("tab10", num_classes)
+    im0 = axes[0].imshow(
+        label,
+        cmap=label_cmap,
+        vmin=-0.5,
+        vmax=num_classes - 0.5,
+        interpolation="nearest",
+    )
     axes[0].set_title("(a) Ground Truth Label")
     axes[0].axis("off")
+    cbar0 = plt.colorbar(im0, ax=axes[0], ticks=np.arange(num_classes), fraction=0.046, pad=0.04)
+    cbar0.ax.set_yticklabels(class_names)
+    cbar0.set_label("Class")
 
     im1 = axes[1].imshow(sdm[class_id], cmap="RdBu_r", interpolation="nearest")
     axes[1].set_title(f"(b) SDM (Class {class_id})")
@@ -211,6 +223,12 @@ def parse_args():
         help="Slice index for 3D volume labels. -1 means auto-select foreground-rich slice.",
     )
     parser.add_argument("--num_classes", type=int, default=4, help="Number of segmentation classes")
+    parser.add_argument(
+        "--class_names",
+        type=str,
+        default="BG,RV,Myo,LV",
+        help="Comma-separated class names for GT legend/colorbar",
+    )
     parser.add_argument("--sigma", type=float, default=3.0, help="Sigma in SDM weight equation")
     parser.add_argument(
         "--sdm_class",
@@ -246,6 +264,12 @@ def main():
             f"sdm_class must be in [0, {args.num_classes - 1}], got {args.sdm_class}"
         )
 
+    class_names = [x.strip() for x in args.class_names.split(",") if x.strip()]
+    if len(class_names) < args.num_classes:
+        class_names = class_names + [f"Class {i}" for i in range(len(class_names), args.num_classes)]
+    elif len(class_names) > args.num_classes:
+        class_names = class_names[: args.num_classes]
+
     case_name = args.case.strip() if args.case.strip() else pick_case_from_list(root_path, args.split_list)
     h5_path = resolve_h5_path(root_path, case_name)
     image, label, picked_idx = load_image_label(h5_path, args.slice_index)
@@ -258,6 +282,8 @@ def main():
         label=label,
         sdm=sdm,
         weight_map=weight_map,
+        class_names=class_names,
+        num_classes=args.num_classes,
         class_id=args.sdm_class,
         save_path=save_path,
         dpi=args.dpi,
