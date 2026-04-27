@@ -143,3 +143,6 @@ test.py
 .vscode-server
 .lightning_studio
 .idea/this_studio.iml
+
+#trash
+trash/
